@@ -18,7 +18,6 @@ import androidx.webgpu.GPUPrimitiveState
 import androidx.webgpu.GPURenderPassColorAttachment
 import androidx.webgpu.GPURenderPassDescriptor
 import androidx.webgpu.GPURenderPassEncoder
-import androidx.webgpu.GPURenderPipeline
 import androidx.webgpu.GPURenderPipelineDescriptor
 import androidx.webgpu.GPUShaderModuleDescriptor
 import androidx.webgpu.GPUShaderSourceWGSL
@@ -29,13 +28,13 @@ import androidx.webgpu.GPUVertexState
 import androidx.webgpu.LoadOp
 import androidx.webgpu.PrimitiveTopology.Companion.TriangleList
 import androidx.webgpu.StoreOp
-import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
+import ca.mpreg.webgpuviewer.renderer.FormatKeyed
+import ca.mpreg.webgpuviewer.renderer.Hdr
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.blitCached
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.blitCachedRegion
-import ca.mpreg.webgpuviewer.transition.Transition.Companion.blitPipeline
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.cacheLock
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.getCachedTexture
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.invalidateCache
@@ -59,7 +58,7 @@ abstract class Transition {
      */
     protected open val premultipliedOutput: Boolean = false
 
-    protected open val pipeline: GPURenderPipeline by lazy {
+    protected open val pipelines = FormatKeyed { format ->
         val shaderModule = device.createShaderModule(
             GPUShaderModuleDescriptor(shaderSourceWGSL = GPUShaderSourceWGSL(code))
         )
@@ -70,7 +69,7 @@ abstract class Transition {
                 fragment = GPUFragmentState(
                     shaderModule, entryPoint = "fs_main", targets = arrayOf(
                         GPUColorTargetState(
-                            format = TextureFormat.RGBA8Unorm, blend = GPUBlendState(
+                            format = format, blend = GPUBlendState(
                                 color = GPUBlendComponent(
                                     srcFactor = if (premultipliedOutput) BlendFactor.One
                                     else BlendFactor.SrcAlpha,
@@ -103,7 +102,7 @@ abstract class Transition {
 
     companion object {
         // Shared blit pipeline for all transitions
-        private val blitPipeline: GPURenderPipeline by lazy {
+        private val blitPipelines = FormatKeyed { format ->
             val device = WebGpuRenderer.device
             val shaderModule = device.createShaderModule(
                 GPUShaderModuleDescriptor(shaderSourceWGSL = GPUShaderSourceWGSL(BLIT_SHADER))
@@ -114,7 +113,7 @@ abstract class Transition {
                     fragment = GPUFragmentState(
                         shaderModule, entryPoint = "fs_main", targets = arrayOf(
                             GPUColorTargetState(
-                                format = TextureFormat.RGBA8Unorm, blend = GPUBlendState(
+                                format = format, blend = GPUBlendState(
                                     color = GPUBlendComponent(
                                         srcFactor = BlendFactor.One,
                                         dstFactor = BlendFactor.OneMinusSrcAlpha,
@@ -180,7 +179,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 """
 
         /** As [blitPipeline], but drawing only a sub-rectangle - see [blitCachedRegion]. */
-        private val regionPipeline: GPURenderPipeline by lazy {
+        private val regionPipelines = FormatKeyed { format ->
             val device = WebGpuRenderer.device
             val shaderModule = device.createShaderModule(
                 GPUShaderModuleDescriptor(shaderSourceWGSL = GPUShaderSourceWGSL(REGION_SHADER))
@@ -191,7 +190,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     fragment = GPUFragmentState(
                         shaderModule, entryPoint = "fs_main", targets = arrayOf(
                             GPUColorTargetState(
-                                format = TextureFormat.RGBA8Unorm, blend = GPUBlendState(
+                                format = format, blend = GPUBlendState(
                                     color = GPUBlendComponent(
                                         srcFactor = BlendFactor.One,
                                         dstFactor = BlendFactor.OneMinusSrcAlpha,
@@ -261,6 +260,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
          */
         internal fun blitCachedRegion(
             pass: GPURenderPassEncoder,
+            /** Format of [pass]'s colour attachment - see [FormatKeyed]. */
+            format: Int,
             cachedView: GPUTextureView?,
             x1: Float,
             y1: Float,
@@ -282,6 +283,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             )
             WebGpuRenderer.device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
 
+            val regionPipeline = regionPipelines[format]
             pass.setPipeline(regionPipeline)
             pass.setBindGroup(
                 0, WebGpuRenderer.device.createBindGroup(
@@ -334,6 +336,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         private var cacheWidth = 0
         private var cacheHeight = 0
+        private var cacheFormat = 0
 
         // Textures pending destruction (deferred to avoid use-after-free)
         private var pendingDestroy1: GPUTexture? = null
@@ -346,8 +349,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             pendingDestroy1 = null
             pendingDestroy2 = null
 
-            // Recreate if size changed
-            if (cacheWidth != width || cacheHeight != height) {
+            // Recreate if the size changed, or if HDR came or went under us - these are
+            // composited onto the swapchain, so they have to match it.
+            val format = Hdr.frameFormat
+            if (cacheWidth != width || cacheHeight != height || cacheFormat != format) {
                 // Defer destruction of old textures
                 pendingDestroy1 = texture1
                 pendingDestroy2 = texture2
@@ -356,14 +361,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 texture1 = WebGpuRenderer.device.createTexture(
                     GPUTextureDescriptor(
                         size = GPUExtent3D(width, height),
-                        format = TextureFormat.RGBA8Unorm,
+                        format = format,
                         usage = TextureUsage.RenderAttachment or TextureUsage.TextureBinding
                     )
                 )
                 texture2 = WebGpuRenderer.device.createTexture(
                     GPUTextureDescriptor(
                         size = GPUExtent3D(width, height),
-                        format = TextureFormat.RGBA8Unorm,
+                        format = format,
                         usage = TextureUsage.RenderAttachment or TextureUsage.TextureBinding
                     )
                 )
@@ -377,6 +382,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 blittedKeys2 = emptySet()
                 cacheWidth = width
                 cacheHeight = height
+                cacheFormat = format
             }
         }
 
@@ -581,6 +587,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         /** Blit a cached texture into [pass] with an offset. Draws nothing if [cachedView] is null. */
         internal fun blitCached(
             pass: GPURenderPassEncoder,
+            /** Format of [pass]'s colour attachment - see [FormatKeyed]. */
+            format: Int,
             cachedView: GPUTextureView?,
             offsetX: Float,
             offsetY: Float
@@ -598,6 +606,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             )
             WebGpuRenderer.device.queue.writeBuffer(uniformBuffer, 0, byteBuffer)
 
+            val blitPipeline = blitPipelines[format]
             pass.setPipeline(blitPipeline)
             pass.setBindGroup(
                 0, WebGpuRenderer.device.createBindGroup(

@@ -25,6 +25,7 @@ import androidx.webgpu.StoreOp
 import ca.mpreg.webgpuviewer.filter.FilterChain
 import ca.mpreg.webgpuviewer.renderer.Downscaler
 import ca.mpreg.webgpuviewer.renderer.DownscalerBox
+import ca.mpreg.webgpuviewer.renderer.Hdr
 import ca.mpreg.webgpuviewer.renderer.Rescaler
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.renderer.Upscaler
@@ -205,6 +206,7 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
     fun init(scope: CoroutineScope, surface: Surface, width: Int, height: Int) {
         this.renderer.init(scope, surface, width, height)
         this.scope = scope
+        Hdr.requestFrame = invalidateCallback
 
         scope.launch {
             _postInit.forEach { it() }
@@ -385,6 +387,8 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
 
     fun cleanup() {
         animationJob?.cancel()
+        // Held by an object that outlives this state, so it has to be dropped by hand.
+        Hdr.requestFrame = null
         tiles.cleanup()
         renderer.cleanup()
     }

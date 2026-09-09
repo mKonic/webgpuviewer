@@ -25,7 +25,6 @@ import androidx.webgpu.GPUFragmentState
 import androidx.webgpu.GPUOrigin3D
 import androidx.webgpu.GPUPrimitiveState
 import androidx.webgpu.GPURenderPassEncoder
-import androidx.webgpu.GPURenderPipeline
 import androidx.webgpu.GPURenderPipelineDescriptor
 import androidx.webgpu.GPUSamplerDescriptor
 import androidx.webgpu.GPUShaderModuleDescriptor
@@ -46,6 +45,7 @@ import androidx.webgpu.VertexStepMode
 import ca.mpreg.webgpuviewer.draw.Font.Companion.FIXED_RASTER_SIZE
 import ca.mpreg.webgpuviewer.draw.Font.Companion.forFamily
 import ca.mpreg.webgpuviewer.draw.Font.Companion.invoke
+import ca.mpreg.webgpuviewer.renderer.FormatKeyed
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import org.json.JSONObject
 import java.nio.ByteBuffer
@@ -684,7 +684,7 @@ private fun chamferDistance(
     return dist
 }
 
-private val pipeline: GPURenderPipeline by lazy {
+private val pipelines = FormatKeyed { format ->
     val shaderModule = device.createShaderModule(
         GPUShaderModuleDescriptor(shaderSourceWGSL = GPUShaderSourceWGSL(TEXT_SHADER))
     )
@@ -709,7 +709,7 @@ private val pipeline: GPURenderPipeline by lazy {
             fragment = GPUFragmentState(
                 module = shaderModule, entryPoint = "fs_main", targets = arrayOf(
                     GPUColorTargetState(
-                        format = TextureFormat.RGBA8Unorm, blend = GPUBlendState(
+                        format = format, blend = GPUBlendState(
                             color = GPUBlendComponent(
                                 srcFactor = BlendFactor.SrcAlpha,
                                 dstFactor = BlendFactor.OneMinusSrcAlpha,
@@ -869,7 +869,7 @@ fun Draw.text(
     }
 
     if (instances.isEmpty()) return
-    drawGlyphInstances(pass, font, instances, color, screenPxRange)
+    drawGlyphInstances(pass, dst.format, font, instances, color, screenPxRange)
 }
 
 /**
@@ -1020,6 +1020,8 @@ private fun addGlyphInstance(
  */
 private fun drawGlyphInstances(
     pass: GPURenderPassEncoder,
+    /** Format of [pass]'s colour attachment - see [FormatKeyed]. */
+    format: Int,
     font: Font,
     instances: List<Float>,
     color: Int,
@@ -1058,6 +1060,7 @@ private fun drawGlyphInstances(
     )
     device.queue.writeBuffer(paramsBuffer, 0, paramsBytes)
 
+    val pipeline = pipelines[format]
     pass.setPipeline(pipeline)
     pass.setVertexBuffer(0, vertexBuffer)
     pass.setBindGroup(

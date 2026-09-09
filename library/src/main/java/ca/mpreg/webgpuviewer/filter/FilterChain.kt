@@ -10,8 +10,8 @@ import androidx.webgpu.GPUSamplerDescriptor
 import androidx.webgpu.GPUTexture
 import androidx.webgpu.GPUTextureDescriptor
 import androidx.webgpu.GPUTextureView
-import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
+import ca.mpreg.webgpuviewer.renderer.Hdr
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 
 /**
@@ -81,7 +81,7 @@ class FilterChain {
             poolHeight = surface.height
         }
 
-        val slot = acquire(surface.width, surface.height, TextureFormat.RGBA8Unorm, false)
+        val slot = acquire(surface.width, surface.height, surface.format, false)
         sceneSlot = slot
         return slot.texture
     }
@@ -106,7 +106,7 @@ class FilterChain {
                 // The swapchain is a render attachment of one fixed format - a compute filter, or
                 // one that resamples or wants headroom, has to land offscreen and be blitted.
                 val direct = last && !filter.usesCompute &&
-                        filter.outputFormat == TextureFormat.RGBA8Unorm &&
+                        filter.outputFormat == surface.format &&
                         outWidth == surface.width && outHeight == surface.height
 
                 val dstSlot = if (direct) null
@@ -138,7 +138,7 @@ class FilterChain {
      * The caller must hand it back with [release] before returning from [Filter.run].
      */
     fun scratch(
-        width: Int, height: Int, format: Int = TextureFormat.RGBA8Unorm, storage: Boolean = false
+        width: Int, height: Int, format: Int = Hdr.frameFormat, storage: Boolean = false
     ): GPUTextureView = acquire(width, height, format, storage).view
 
     /** Return a [scratch] texture to the pool. */

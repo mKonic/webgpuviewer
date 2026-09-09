@@ -6,6 +6,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.ui.util.fastCoerceIn
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPUTexture
+import ca.mpreg.webgpuviewer.closeTo
 import ca.mpreg.webgpuviewer.draw.Draw
 import ca.mpreg.webgpuviewer.draw.clear
 import ca.mpreg.webgpuviewer.renderer.RenderPage
@@ -36,7 +37,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
      * Clamped away from 0, which is not a scale anything can be drawn at. Setting it lifts a
      * [scale] that is now below the floor, so it takes effect without waiting for a gesture.
      */
-    var minZoomWidthFraction: Float = 1f
+    var homeScale: Float = 1f
         set(value) {
             val clamped = value.fastCoerceIn(0.01f, 1f)
             if (clamped == field) return
@@ -45,11 +46,18 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             invalidate()
         }
 
-    /** Lowest [scale] a gesture may settle at - see [minZoomWidthFraction]. */
-    val minScale: Float get() = minZoomWidthFraction
+    /** Lowest [scale] a gesture may settle at - see [homeScale]. */
+    var minScale = 0f
+        get() {
+            if (field > 0) return field
+            return homeScale
+        }
+
+    val atHomeScale: Boolean
+        get() = scale.closeTo(homeScale)
 
     /** Follows [minScale], so a double tap off the zoom-out floor still doubles what is on screen. */
-    val doubleTapScale: Float get() = minScale * 2f
+    val doubleTapScale: Float get() = homeScale * 2f
 
     val maxScale: Float get() = max(doubleTapScale * 2f, 4f)
 

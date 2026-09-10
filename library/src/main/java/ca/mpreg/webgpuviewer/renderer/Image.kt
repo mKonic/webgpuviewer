@@ -170,6 +170,31 @@ class Image private constructor(
 
             val image = Image(width, height, isHdr = keepHdr, hdrHeadroom = headroom)
 
+            try {
+                return finishImage(
+                    image, pixels, width, height, keepHdr, headroom, createMipMaps,
+                    trimColors, trimThreshold, backgroundColor,
+                )
+            } catch (e: Throwable) {
+                // A cancelled decode (e.g. the viewer closing mid-load) still leaves the buffer
+                // allocated above - nothing else holds a reference to release it.
+                image.cleanup()
+                throw e
+            }
+        }
+
+        private suspend fun finishImage(
+            image: Image,
+            pixels: ByteBuffer,
+            width: Int,
+            height: Int,
+            keepHdr: Boolean,
+            headroom: Float,
+            createMipMaps: Boolean,
+            trimColors: List<FloatArray>?,
+            trimThreshold: Float,
+            backgroundColor: Int?,
+        ): Image {
             val tileFormat =
                 if (keepHdr) TextureFormat.RGBA16Float else TextureFormat.RGBA8Unorm
 
@@ -276,15 +301,20 @@ class Image private constructor(
         }
 
         suspend operator fun invoke(width: Int, height: Int): Image {
-            return Image(width, height).apply {
+            val image = Image(width, height)
+            try {
                 WebGpuRenderer.withContext { _ ->
                     try {
-                        mipmaps.add(Mipmap(width, height))
+                        image.mipmaps.add(Mipmap(width, height))
                     } catch (e: Exception) {
                         Log.e("Renderer", "Error creating drawable image", e)
                         throw e
                     }
                 }
+                return image
+            } catch (e: Throwable) {
+                image.cleanup()
+                throw e
             }
         }
     }

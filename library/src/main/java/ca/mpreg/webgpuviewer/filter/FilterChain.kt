@@ -169,6 +169,10 @@ class FilterChain {
 
     private var frame = 0L
 
+    /** A filter whose output size varies frame to frame could otherwise pile up entries forever. */
+    private var poolBytes = 0L
+    private val maxPoolBytes = 48L * 1024 * 1024
+
     // Sizes are screen-scale and the format is a short enum, so one long holds the whole key.
     private fun key(width: Int, height: Int, format: Int, storage: Boolean): Long =
         (width.toLong() shl 44) or (height.toLong() shl 24) or
@@ -192,6 +196,8 @@ class FilterChain {
             return free
         }
 
+        if (poolBytes > maxPoolBytes) evictOldestUnused()
+
         var usage = TextureUsage.TextureBinding or TextureUsage.RenderAttachment
         if (storage) usage = usage or TextureUsage.StorageBinding
 
@@ -204,7 +210,29 @@ class FilterChain {
         slot.inUse = true
         slot.lastFrame = frame
         slots.add(slot)
+        poolBytes += width.toLong() * height * 4
         return slot
+    }
+
+    /** The single oldest slot nothing is currently reading, across every size/format bucket. */
+    private fun evictOldestUnused() {
+        var oldestKey: Long? = null
+        var oldestSlot: Slot? = null
+        for ((k, slots) in pool) {
+            for (slot in slots) {
+                if (!slot.inUse && (oldestSlot == null || slot.lastFrame < oldestSlot.lastFrame)) {
+                    oldestKey = k
+                    oldestSlot = slot
+                }
+            }
+        }
+        val k = oldestKey ?: return
+        val slot = oldestSlot ?: return
+        val slots = pool[k] ?: return
+        slots.remove(slot)
+        if (slots.isEmpty()) pool.remove(k)
+        poolBytes -= slot.texture.width.toLong() * slot.texture.height * 4
+        slot.texture.destroy()
     }
 
     private fun releaseAll() {
@@ -215,6 +243,7 @@ class FilterChain {
     private fun destroyPool() {
         for (slots in pool.values) for (slot in slots) slot.texture.destroy()
         pool.clear()
+        poolBytes = 0L
         sceneSlot = null
     }
 

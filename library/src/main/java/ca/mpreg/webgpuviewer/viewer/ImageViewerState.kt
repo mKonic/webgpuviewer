@@ -11,8 +11,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.unit.Density
-import androidx.compose.ui.util.fastCoerceAtLeast
-import androidx.compose.ui.util.fastCoerceAtMost
 import androidx.webgpu.GPUColor
 import androidx.webgpu.GPUCommandEncoder
 import androidx.webgpu.GPURenderPassColorAttachment
@@ -30,7 +28,6 @@ import ca.mpreg.webgpuviewer.renderer.Rescaler
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.renderer.Upscaler
 import ca.mpreg.webgpuviewer.renderer.UpscalerArtCnn
-import ca.mpreg.webgpuviewer.renderer.UpscalerCatmullRom
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer.Companion.dispatcher
 import ca.mpreg.webgpuviewer.transition.Transition
@@ -102,15 +99,19 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
 
     var pageOffset = 0f
         set(value) {
+            if (value.isNaN() || value.isInfinite()) return
             var v = value
             var pageDelta = 0
 
             if (!suppressPageChange) {
-                while (v >= 1f && haveNext) {
+                // Guards a haveNext/havePrev stuck true against a pathological page provider.
+                var guard = 0
+                while (v >= 1f && haveNext && guard++ < 1000) {
                     pageDelta += 1
                     v -= 1f
                 }
-                while (v <= -1f && havePrev) {
+                guard = 0
+                while (v <= -1f && havePrev && guard++ < 1000) {
                     pageDelta -= 1
                     v += 1f
                 }
@@ -126,7 +127,7 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
             field = v
 
             if (pageDelta != 0) {
-                onPageChange?.invoke(if (isReversed) -pageDelta else pageDelta)
+                onPageChange?.runCatching { invoke(if (isReversed) -pageDelta else pageDelta) }
             }
 
             // Rotate rather than invalidate: onPageChange already moved what backs getPage, so a

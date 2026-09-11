@@ -7,8 +7,17 @@ import ca.mpreg.webgpuviewer.ImageUtil.toneMapToSdrNative
 import java.nio.ByteBuffer
 
 object ImageUtil {
+    /** False on a packaging/ABI mismatch - loading a class that touches this shouldn't itself crash. */
+    val isAvailable: Boolean
+
     init {
-        System.loadLibrary("resize")
+        isAvailable = try {
+            System.loadLibrary("resize")
+            true
+        } catch (e: Throwable) {
+            android.util.Log.e("ImageUtil", "Failed to load native resize library", e)
+            false
+        }
     }
 
     external fun resizeLinearAreaNative(

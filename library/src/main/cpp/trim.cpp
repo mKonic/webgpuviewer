@@ -276,23 +276,44 @@ Java_ca_mpreg_webgpuviewer_TrimNative_findTrim(JNIEnv *env, jobject thiz,
                                                jint height, jfloatArray colors,
                                                jfloat threshold,
                                                jintArray outBounds) {
-  if (width <= 0 || height <= 0) {
+  if (!env || !pixelBuffer || !colors || !outBounds) {
+    return JNI_FALSE;
+  }
+  if (width <= 0 || height <= 0 || width > 16384 || height > 16384) {
+    return JNI_FALSE;
+  }
+  if (!std::isfinite(threshold)) {
     return JNI_FALSE;
   }
 
   const uint8_t *pixels =
       static_cast<const uint8_t *>(env->GetDirectBufferAddress(pixelBuffer));
+  if (env->ExceptionCheck()) {
+    env->ExceptionClear();
+    return JNI_FALSE;
+  }
   if (pixels == nullptr) {
     return JNI_FALSE;
   }
   const jlong capacity = env->GetDirectBufferCapacity(pixelBuffer);
-  if (capacity < static_cast<jlong>(width) * height * kChannels) {
+  if (capacity < 0 ||
+      capacity < static_cast<jlong>(width) * height * kChannels) {
     return JNI_FALSE;
   }
 
   const jsize colorFloats = env->GetArrayLength(colors);
+  if (env->ExceptionCheck()) {
+    env->ExceptionClear();
+    return JNI_FALSE;
+  }
   const int colorCount = colorFloats / 3;
-  if (colorCount <= 0 || env->GetArrayLength(outBounds) < colorCount * 4) {
+  const jsize outLen = env->GetArrayLength(outBounds);
+  if (env->ExceptionCheck()) {
+    env->ExceptionClear();
+    return JNI_FALSE;
+  }
+  /* 16 is well past any real caller's trim-color count. */
+  if (colorCount <= 0 || colorCount > 16 || outLen < colorCount * 4) {
     return JNI_FALSE;
   }
 
@@ -381,17 +402,25 @@ Java_ca_mpreg_webgpuviewer_TrimNative_detectBackground(JNIEnv *env,
   (void)threshold;
   const jint kWhite = static_cast<jint>(0xFFFFFFFFu);
 
-  if (width <= 0 || height <= 0) {
+  if (!env || !pixelBuffer) {
+    return kWhite;
+  }
+  if (width <= 0 || height <= 0 || width > 16384 || height > 16384) {
     return kWhite;
   }
 
   const uint8_t *pixels =
       static_cast<const uint8_t *>(env->GetDirectBufferAddress(pixelBuffer));
+  if (env->ExceptionCheck()) {
+    env->ExceptionClear();
+    return kWhite;
+  }
   if (pixels == nullptr) {
     return kWhite;
   }
   const jlong capacity = env->GetDirectBufferCapacity(pixelBuffer);
-  if (capacity < static_cast<jlong>(width) * height * kChannels) {
+  if (capacity < 0 ||
+      capacity < static_cast<jlong>(width) * height * kChannels) {
     return kWhite;
   }
 

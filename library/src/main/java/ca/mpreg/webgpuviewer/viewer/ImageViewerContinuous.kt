@@ -56,7 +56,6 @@ fun ImageViewerContinuous(
 
     RequestMaxRefreshRate()
 
-    // See [ViewerSurface] for why the surface type depends on the API level.
     val surfaceModifier = modifier
         .fillMaxSize()
         .pointerInput(Unit) {
@@ -64,10 +63,9 @@ fun ImageViewerContinuous(
             val touchSlop = viewConfiguration.touchSlop
 
             /**
-             * Walk a scale that overshot back into bounds about [originX]/[originY], the point
-             * the zoom was anchored to - fractions of the viewport from its centre. False if
-             * the scale was already fine. Position interpolates on the reciprocal of the
-             * scale, as ImagePage.animateTo does, so the origin holds throughout.
+             * Walk a scale that overshot back into bounds about [originX]/[originY] - the
+             * zoom's anchor, as fractions of the viewport from its centre. False if the scale
+             * was already fine. Position interpolates on 1/scale so the anchor holds.
              */
             fun snapScaleIntoBounds(originX: Float, originY: Float): Boolean {
                 val startScale = state.scale
@@ -109,7 +107,7 @@ fun ImageViewerContinuous(
                 return true
             }
 
-            /** Walk a pan that overshot back to the edge it overshot, the scale being fine. */
+            /** Walk a pan that overshot back to its edge, the scale being fine. */
             fun snapOffsetXIntoBounds() {
                 val maxOffsetX = max(0f, (state.scale - 1f) / (2f * state.scale))
                 val clampedX = state.offsetX.fastCoerceIn(-maxOffsetX, maxOffsetX)
@@ -133,8 +131,7 @@ fun ImageViewerContinuous(
                 state.animationJob?.cancel()
                 view.parent?.requestDisallowInterceptTouchEvent(true)
 
-                // A touch on moving content only stops it - see ImageViewer.kt's copy of
-                // this guard for what that suppresses and why the flags are cleared here.
+                // A touch on moving content only stops it - see ImageViewer.kt's copy.
                 val stoppedMotion = state.isScaleAnimating || state.isFlinging
                 if (stoppedMotion) {
                     state.isScaleAnimating = false
@@ -156,11 +153,9 @@ fun ImageViewerContinuous(
 
                 if (waitForCleanUp(firstDown.id, doubleTapTimeout, touchSlop) != null) {
                     longPressJob?.cancel()
-                    // Tap - wait for a double tap. A touch that only stopped motion waits
-                    // too: no single tap below, but it can still be the first of a pair.
+                    // A touch that only stopped motion can still be the first of a pair.
                     val secondDown = waitForDown(doubleTapTimeout)
                     if (secondDown == null) {
-                        // Single tap
                         if (!stoppedMotion) {
                             state.onTap?.invoke(
                                 Offset(
@@ -173,9 +168,7 @@ fun ImageViewerContinuous(
                     }
 
                     if (waitForCleanUp(secondDown.id, doubleTapTimeout, touchSlop) != null) {
-                        // Double tap: toggle zoom
                         if (!state.atHomeScale) {
-                            // Zoom out: animate offsetX to 0, anchor Y to tap point
                             val py = secondDown.position.y / state.height - 0.5f
                             state.animationJob = scope.launch {
                                 state.isScaleAnimating = true
@@ -204,7 +197,6 @@ fun ImageViewerContinuous(
                                 }
                             }
                         } else {
-                            // Zoom in at tap point
                             val px = secondDown.position.x / state.width - 0.5f
                             val py = secondDown.position.y / state.height - 0.5f
                             state.animationJob = scope.launch {
@@ -238,10 +230,8 @@ fun ImageViewerContinuous(
                         val dragPointerId = secondDown.id
                         val originalScale = state.scale
                         val originalOffsetX = state.offsetX
-                        // Zoom anchors the tap point, and the scroll that needs is a
-                        // function of the total scale change - so it is applied as the step
-                        // since the last frame. Page crossings and the end of the document
-                        // are scrollBy's to keep, and it is the only thing that keeps them.
+                        // The anchoring scroll follows the total scale change, but must go
+                        // through scrollBy as a step: only scrollBy crosses pages and clamps.
                         var anchorApplied = 0f
                         fun anchorScroll(target: Float) {
                             state.scrollBy(target - anchorApplied)
@@ -280,8 +270,8 @@ fun ImageViewerContinuous(
                                 }
                             }
                             val dragVelocity = velocityTracker.calculateVelocity()
-                            // Decided before the finally below, so isScaleAnimating has no
-                            // gap between this drag ending and its fling starting.
+                            // Before the finally below, so isScaleAnimating has no gap
+                            // between this drag ending and its fling starting.
                             willFlingZoom =
                                 abs(dragVelocity.y) > 200 && state.scale > state.minScale && state.scale < state.maxScale
                         } finally {
@@ -290,7 +280,6 @@ fun ImageViewerContinuous(
 
                         val velocity = velocityTracker.calculateVelocity()
                         if (willFlingZoom) {
-                            // Fling zoom
                             state.animationJob = scope.launch(NormalMotionDurationScale) {
                                 try {
                                     Animatable(0f).animateDecay(
@@ -321,7 +310,6 @@ fun ImageViewerContinuous(
                         }
                     }
                 } else {
-                    // Drag gesture
                     val velocityTracker = VelocityTracker()
                     velocityTracker.addPointerInputChange(firstDown)
 
@@ -351,8 +339,8 @@ fun ImageViewerContinuous(
 
                                 val pan = event.calculatePan()
                                 val zoom = event.calculateZoom()
-                                // Whenever two fingers are down: a quiet moment mid-pinch is
-                                // still a pinch, and generation stays held off.
+                                // Any two fingers down: a quiet moment mid-pinch is still
+                                // a pinch, so generation stays held off.
                                 state.isScaleAnimating =
                                     event.changes.size > 1 && event.changes.all { it.pressed }
 
@@ -402,7 +390,6 @@ fun ImageViewerContinuous(
                     if (longPressed || canceled) return@awaitEachGesture
 
                     if (!snapScaleIntoBounds(zoomOriginX, zoomOriginY)) {
-                        // Scale in bounds: fling pan or snap offsetX
                         val velocity = velocityTracker.calculateVelocity()
                         // Held still before lifting: no fling, however fast it got there.
                         if ((lastEventTime - lastMoveTime) < 100 &&
@@ -430,19 +417,17 @@ fun ImageViewerContinuous(
                                         state.scrollBy(-dirY * delta / state.scale)
                                         state.invalidate()
                                         // Pinned on both axes: the decay would run on
-                                        // without moving anything, swallowing the next tap
-                                        // as "mid-fling". It never reverses, so one such
-                                        // frame settles it - but only one that asked for a
-                                        // move, the first frame being the initial value.
+                                        // without moving, swallowing the next tap as
+                                        // "mid-fling". It never reverses, so one frame
+                                        // settles it - but only one that asked to move.
                                         if (delta != 0f && state.offsetX == prevOffsetX && state.scrollY == prevScrollY) {
                                             throw FlingStalled()
                                         }
                                     }
                                 } catch (_: FlingStalled) {
-                                    // Nothing left to glide.
                                 } finally {
-                                    // A final invalidate so generation resumes promptly rather
-                                    // than waiting on whatever gesture happens to invalidate next.
+                                    // Invalidate so generation resumes without waiting on the
+                                    // next gesture.
                                     state.isFlinging = false
                                     state.invalidate()
                                 }
@@ -457,11 +442,11 @@ fun ImageViewerContinuous(
 
     ViewerSurface(surfaceModifier) { surface, width, height ->
         try {
-            // Before init: whether the panel does HDR at all gates the decode path, which can
-            // reach an image before the first frame is drawn.
+            // Before init: the panel's HDR support gates the decode path, which can reach
+            // an image before the first frame.
             attachHdrDisplay(view)
             state.init(scope, surface, width, height)
-            // After init, so Hdr.resolve has run and the surface's capability is known too.
+            // After init, so Hdr.resolve has run and the surface's capability is known.
             attachHdrSurface(view)
             state.invalidate()
             state.collect()

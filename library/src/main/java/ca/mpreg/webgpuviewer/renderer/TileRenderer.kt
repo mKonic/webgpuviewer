@@ -1047,6 +1047,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         dst: GPUTexture,
         cameraDocY: Float,
         docTop: Float,
+        pageHeight: Float,
         viewerOffsetX: Float,
         scale: Float
     ): ContinuousAnchor? {
@@ -1057,8 +1058,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             dst.width / 2f + scale * (viewerOffsetX * dst.width + WebGpuRenderer.offsetX * dst.width)
         val anchorY =
             dst.height / 2f - scale * cameraDocY + scale * WebGpuRenderer.offsetY * dst.height
-        val pageHeightDoc = page.height * pageScaleAtZoom1
-        val centerYOffset = scale * (docTop + pageHeightDoc / 2f)
+        // The caller's measured height, never one derived here - the two must agree exactly.
+        val centerYOffset = scale * (docTop + pageHeight / 2f)
         return ContinuousAnchor(pageScale, anchorX, anchorY, centerYOffset)
     }
 
@@ -1197,8 +1198,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
     /**
      * Blit [page]'s cached tiles and enqueue the missing ones - the continuous viewer's
-     * placement, via [cameraDocY] (the camera's document position) and [docTop] (this page's
-     * own, both in screen pixels at zoom 1).
+     * placement, via [cameraDocY] (the camera's document position), [docTop] (this page's own
+     * top) and [pageHeight] (its content height - all in screen pixels at zoom 1).
      *
      * Rounds only the shared *camera* anchor, leaving each page's own offset from it exact -
      * unlike the paged overload, several pages can draw through here in the same frame, and
@@ -1213,12 +1214,13 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         dst: GPUTexture,
         cameraDocY: Float,
         docTop: Float,
+        pageHeight: Float,
         viewerOffsetX: Float,
         scale: Float,
         suppressGeneration: Boolean
     ): Boolean {
-        val a =
-            continuousAnchor(page, dst, cameraDocY, docTop, viewerOffsetX, scale) ?: return false
+        val a = continuousAnchor(page, dst, cameraDocY, docTop, pageHeight, viewerOffsetX, scale)
+            ?: return false
         return drawCore(
             pass,
             page,

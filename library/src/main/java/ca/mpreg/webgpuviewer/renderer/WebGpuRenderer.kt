@@ -36,6 +36,12 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 
+enum class FrameResult {
+    Drawn,
+    Retry,
+    Unavailable,
+}
+
 class WebGpuRenderer {
     companion object {
         const val MIN_SURFACE_DIMENSION = 8
@@ -61,6 +67,16 @@ class WebGpuRenderer {
         val isAvailable: Boolean
             get() = initError == null && !deviceLost &&
                     ::instance.isInitialized && ::adapter.isInitialized && ::device.isInitialized
+
+        val unavailableReason: String?
+            get() = when {
+                initError != null -> "WebGPU failed to initialize: ${initError?.message}"
+                deviceLost -> "WebGPU device lost"
+                !::instance.isInitialized || !::adapter.isInitialized ||
+                        !::device.isInitialized -> "WebGPU never initialized"
+
+                else -> null
+            }
 
         fun requireAvailable() {
             check(isAvailable) {
@@ -230,31 +246,63 @@ class WebGpuRenderer {
 
     private var scope: CoroutineScope? = null
 
+    private var pendingSurface: Surface? = null
+
+    @Volatile
+    private var resizePending = false
+
     @Synchronized
     fun init(scope: CoroutineScope, surface: Surface, width: Int, height: Int) {
         if (!isAvailable) {
-            Log.w("WebGpuRenderer", "init called but WebGPU not available: $initError")
+            Log.w("WebGpuRenderer", "init called but WebGPU not available: $unavailableReason")
             return
         }
         this.scope = scope
+        this.pendingSurface = surface
         this.width = width.coerceIn(0, MAX_SURFACE_DIMENSION)
         this.height = height.coerceIn(0, MAX_SURFACE_DIMENSION)
+        createSurface()
+    }
 
-        // A transient layout pass can hand over a near-zero size - deferred rather than attempted;
-        // [reconfigure] picks it up once a real size arrives, same as a resize already does.
-        if (this.width < MIN_SURFACE_DIMENSION || this.height < MIN_SURFACE_DIMENSION) {
-            Log.w(
-                "WebGpuRenderer",
-                "init deferred for undersized surface ${this.width}x${this.height}"
-            )
+    @Synchronized
+    fun resize(width: Int, height: Int) {
+        if (!isAvailable) return
+        val w = width.coerceIn(0, MAX_SURFACE_DIMENSION)
+        val h = height.coerceIn(0, MAX_SURFACE_DIMENSION)
+        if (w == this.width && h == this.height && surface != null) return
+        this.width = w
+        this.height = h
+
+        if (surface == null) {
+            createSurface()
+        } else {
+            // Not here: [render] holds [mutex] across a suspending draw, so blocking on it from
+            // this thread deadlocks against the frame that owns it.
+            resizePending = true
+        }
+    }
+
+    /** Dispatches only when not already on the render thread, which would deadlock. */
+    private fun onRenderThread(block: () -> Unit) {
+        if (Thread.currentThread().name == "WebGPU-Render-Thread") {
+            block()
+        } else {
+            runBlocking(dispatcher) { block() }
+        }
+    }
+
+    private fun createSurface() {
+        if (surface != null) return
+        val pending = pendingSurface ?: return
+
+        // A transient layout pass can hand over a near-zero size; [resize] picks it up later.
+        if (width < MIN_SURFACE_DIMENSION || height < MIN_SURFACE_DIMENSION) {
+            Log.w("WebGpuRenderer", "surface deferred at undersized ${width}x${height}")
             return
         }
 
-        // Check if already on dispatcher thread to avoid deadlock
-        val isOnDispatcherThread = Thread.currentThread().name == "WebGPU-Render-Thread"
-
         val initSurface = {
-            this@WebGpuRenderer.surface = surface.let {
+            this@WebGpuRenderer.surface = pending.let {
                 instance.createSurface(
                     GPUSurfaceDescriptor(
                         surfaceSourceAndroidNativeWindow = GPUSurfaceSourceAndroidNativeWindow(
@@ -283,25 +331,27 @@ class WebGpuRenderer {
             }
         }
 
-        if (isOnDispatcherThread) {
-            initSurface()
-        } else {
-            runBlocking(dispatcher) {
-                initSurface()
-            }
-        }
+        onRenderThread(initSurface)
     }
 
-    /** Draws one frame. False when the swapchain had no texture: nothing drawn, retry next frame. */
-    suspend fun render(fn: suspend (GPUCommandEncoder, GPUTexture) -> Unit): Boolean {
-        if (!isAvailable) return false
+    suspend fun render(fn: suspend (GPUCommandEncoder, GPUTexture) -> Unit): FrameResult {
+        if (!isAvailable) return FrameResult.Unavailable
         val startTime = if (profilingEnabled) System.nanoTime() else 0L
 
         mutex.withLock {
-            val surface = surface ?: return false
+            // Only [init]/[resize] can build one, so a redraw alone accomplishes nothing.
+            val surface = surface ?: return FrameResult.Unavailable
             // A stale surface from before a resize shrunk below this would otherwise still reach
-            // getCurrentTexture - [init]/[reconfigure] already refuse to configure one this small.
-            if (width < MIN_SURFACE_DIMENSION || height < MIN_SURFACE_DIMENSION) return false
+            // getCurrentTexture - [createSurface]/[reconfigure] refuse to configure one this small.
+            if (width < MIN_SURFACE_DIMENSION || height < MIN_SURFACE_DIMENSION) {
+                return FrameResult.Unavailable
+            }
+
+            // Between frames and under the lock - the only place a rebuild is safe.
+            if (resizePending) {
+                resizePending = false
+                reconfigure(surface)
+            }
 
             // An HDR image arriving, or the last one leaving, changes what the swapchain should
             // be. Here rather than at the decode: the format can only change between frames, and
@@ -320,7 +370,7 @@ class WebGpuRenderer {
                 surface.getCurrentTexture()
             } catch (e: Exception) {
                 Log.w("WebGpuRenderer", "Failed to get current texture", e)
-                return false
+                return FrameResult.Retry
             }
 
             // A non-success status hands back a null texture, and every GPUTexture read goes
@@ -334,7 +384,7 @@ class WebGpuRenderer {
                 )
                 // Lost needs a whole new surface, which only the app can hand over.
                 if (current.status != SurfaceGetCurrentTextureStatus.Lost) reconfigure(surface)
-                return false
+                return FrameResult.Retry
             }
 
             try {
@@ -363,7 +413,7 @@ class WebGpuRenderer {
             )
         }
 
-        return true
+        return FrameResult.Drawn
     }
 
     /** Rebuild the swapchain at the size [init] was last given. Must hold [mutex]. */
@@ -390,6 +440,8 @@ class WebGpuRenderer {
                 filters.cleanup()
                 surface?.close()
                 surface = null
+                pendingSurface = null
+                resizePending = false
             }
         }
 

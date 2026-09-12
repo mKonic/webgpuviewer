@@ -1,6 +1,7 @@
 package ca.mpreg.webgpuviewer.viewer
 
 import android.content.res.Resources
+import android.util.Log
 import android.view.Surface
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
@@ -23,6 +24,7 @@ import androidx.webgpu.StoreOp
 import ca.mpreg.webgpuviewer.filter.FilterChain
 import ca.mpreg.webgpuviewer.renderer.Downscaler
 import ca.mpreg.webgpuviewer.renderer.DownscalerBox
+import ca.mpreg.webgpuviewer.renderer.FrameResult
 import ca.mpreg.webgpuviewer.renderer.Hdr
 import ca.mpreg.webgpuviewer.renderer.Rescaler
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
@@ -178,6 +180,9 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
 
     var fetchPage: ((Int) -> ImagePage?)? = null
 
+    /** Once per outage, on the render dispatcher - see [FrameResult.Unavailable]. */
+    var onRenderUnavailable: ((String?) -> Unit)? = null
+
     var onPageChange: ((Int) -> Unit)? = null
     var onTap: ((Offset) -> Unit)? = null
     var onLongTap: ((Offset) -> Unit)? = null
@@ -220,6 +225,12 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
         }
     }
 
+    @Synchronized
+    fun resize(width: Int, height: Int) {
+        renderer.resize(width, height)
+        invalidate()
+    }
+
     var firstPos = Offset.Zero
     var currentPos = Offset.Zero
 
@@ -227,6 +238,9 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
 
     // Anything changed since the last frame, however many invalidates said so.
     private val dirty = AtomicBoolean(true)
+
+    @Volatile
+    private var reportedUnavailable = false
 
     // Wakes [collect] when there is nothing to draw. Buffered, so no send races [dirty]'s check.
     private val renderWake = Channel<Unit>(Channel.CONFLATED)
@@ -265,12 +279,21 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
             // Captured here, drawn on the GPU thread below - see this function's doc.
             val snapshot = captureRenderState() ?: continue
             drawing = launch(dispatcher) {
-                // Nothing drawn - ask for the frame again.
-                if (!renderer.render { encoder, texture ->
-                        renderSnapshot(encoder, texture, snapshot)
+                when (renderer.render { encoder, texture ->
+                    renderSnapshot(encoder, texture, snapshot)
+                }) {
+                    FrameResult.Drawn -> reportedUnavailable = false
+
+                    FrameResult.Retry -> invalidate()
+
+                    // No invalidate: leaving [dirty] clear parks the loop on [renderWake] rather
+                    // than spinning the frame clock, and a later resize still wakes it.
+                    FrameResult.Unavailable -> if (!reportedUnavailable) {
+                        reportedUnavailable = true
+                        val reason = WebGpuRenderer.unavailableReason ?: "no render surface"
+                        Log.e("ImageViewerState", "Nothing can be drawn: $reason")
+                        onRenderUnavailable?.runCatching { invoke(reason) }
                     }
-                ) {
-                    invalidate()
                 }
             }
         }

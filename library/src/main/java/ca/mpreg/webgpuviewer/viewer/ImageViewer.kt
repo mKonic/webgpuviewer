@@ -519,6 +519,7 @@ fun ImageViewer(
             // reach an image before the first frame is drawn.
             attachHdrDisplay(view)
             state.init(scope, surface, width, height)
+            surface.onChanged { w, h -> state.resize(w, h) }
             // After init, so Hdr.resolve has run and the surface's capability is known too.
             attachHdrSurface(view)
             state.invalidate()

@@ -25,6 +25,13 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         private const val MAX_PAGE_WALK = 10_000
     }
 
+    var backgroundColor: Int = 0
+        set(value) {
+            if (value == field) return
+            field = value
+            invalidate()
+        }
+
     private fun Float.isSane() = !isNaN() && !isInfinite()
 
     private fun Double.isSane() = !isNaN() && !isInfinite()
@@ -504,6 +511,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         val cameraDocY: Float,
         /** [isScaleAnimating] or [isFlinging] - either means "don't generate tiles right now". */
         val suppressGeneration: Boolean,
+        val backgroundColor: Int,
     )
 
     override fun captureRenderState(): Any = synchronized(scrollLock) {
@@ -620,7 +628,9 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             onPageScrolledThrough?.runCatching { invoke(it) }
         }
 
-        ContinuousRenderSnapshot(pages, scale, offsetX, cameraDocY, isScaleAnimating || isFlinging)
+        ContinuousRenderSnapshot(
+            pages, scale, offsetX, cameraDocY, isScaleAnimating || isFlinging, backgroundColor
+        )
     }
 
     override suspend fun renderSnapshot(
@@ -628,7 +638,11 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     ) {
         val s = snapshot as ContinuousRenderSnapshot
         tiles.newFrame()
-        if (s.pages.isEmpty()) return
+        // Still clear: the swapchain rotates buffers, so leaving it would show a stale frame.
+        if (s.pages.isEmpty()) {
+            Draw.clear(encoder, texture, s.backgroundColor)
+            return
+        }
 
         // ImageSingle pages batch into one shared pass; a Render page has no image or tile to
         // draw, so it goes afterward through renderLoaded. renderLoaded loads rather than clears
@@ -644,7 +658,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         val anchorY = dstH / 2f - s.scale * s.cameraDocY + s.scale * WebGpuRenderer.offsetY * dstH
 
         if (hasImagePage) {
-            renderPass(encoder, texture) { pass ->
+            renderPass(encoder, texture, s.backgroundColor) { pass ->
                 s.pages.forEach { vp ->
                     val page = vp.page as? ImagePage.ImageSingle ?: return@forEach
                     // Captured on the main thread: the page can have been evicted since, its
@@ -707,7 +721,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                 }
             }
         } else {
-            Draw.clear(encoder, texture, 0)
+            Draw.clear(encoder, texture, s.backgroundColor)
         }
 
         s.pages.forEach { vp ->

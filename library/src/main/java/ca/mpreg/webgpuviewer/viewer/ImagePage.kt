@@ -44,6 +44,7 @@ import kotlinx.coroutines.yield
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
@@ -370,8 +371,10 @@ open class ImagePage {
          * place images with their own math ([ca.mpreg.webgpuviewer.renderer.TileRenderer],
          * [ImageViewerContinuousState]) instead of [renderPage].
          */
-        internal open fun forEachImage(action: (image: Image, offsetX: Float) -> Unit) {
-            currentImage?.let { action(it, 0f) }
+        internal open fun forEachImage(
+            action: (image: Image, offsetX: Float, imageScale: Float) -> Unit
+        ) {
+            currentImage?.let { action(it, 0f, 1f) }
         }
 
         /** True once at least one of this page's images has been uploaded and can be drawn. */
@@ -782,11 +785,13 @@ open class ImagePage {
             // been evicted since - its images' buffers are gone, and touching one throws.
             if (destroyed) return
 
-            forEachImage { img, srcOffsetX ->
+            forEachImage { img, srcOffsetX, imgScale ->
                 if (img.mipmaps.isNotEmpty()) {
-                    val placeX = this.x + x + srcOffsetX / dst.width
-                    val placeY = this.y + y
-                    val placeScale = this.scale * scale
+                    val placeX = (this.x + x + srcOffsetX / dst.width + WebGpuRenderer.offsetX) /
+                            imgScale - WebGpuRenderer.offsetX
+                    val placeY =
+                        (this.y + y + WebGpuRenderer.offsetY) / imgScale - WebGpuRenderer.offsetY
+                    val placeScale = this.scale * scale * imgScale
                     val rect = img.placement(dst, placeX, placeY, placeScale)
                     action(img, rect, placeX, placeY, placeScale)
                 }
@@ -868,10 +873,25 @@ open class ImagePage {
         private val rightSingle: ImageSingle?
             get() = right as? ImageSingle
 
+        // Grows the shorter side to the taller one's height
+        private fun sideScale(side: ImagePage?): Float {
+            val h = side?.height ?: return 1f
+            val tallest = max(left?.height ?: 0, right?.height ?: 0)
+            return if (h <= 0 || tallest <= h) 1f else tallest.toFloat() / h
+        }
+
+        private val leftScale: Float
+            get() = sideScale(left)
+        private val rightScale: Float
+            get() = sideScale(right)
+
+        private fun sideWidth(side: ImagePage?): Float =
+            (side?.width ?: 0) * sideScale(side)
+
         /** Runs [action] for each present side, with its pixel offset from the seam. */
-        private inline fun forEachSide(action: (side: ImagePage, offsetX: Float) -> Unit) {
-            left?.let { action(it, -0.5f * it.width) }
-            right?.let { action(it, 0.5f * it.width) }
+        private inline fun forEachSide(action: (side: ImagePage, offsetX: Float, scale: Float) -> Unit) {
+            left?.let { action(it, -0.5f * it.width * leftScale, leftScale) }
+            right?.let { action(it, 0.5f * it.width * rightScale, rightScale) }
         }
 
         override var highQuality: Boolean
@@ -895,9 +915,11 @@ open class ImagePage {
          * Each side sits half its own width out from the seam (the page anchor). A [Render] side
          * has no image to place and paints itself instead - see [drawRenderSides].
          */
-        override fun forEachImage(action: (image: Image, offsetX: Float) -> Unit) {
-            leftSingle?.currentImage?.let { action(it, -0.5f * it.width) }
-            rightSingle?.currentImage?.let { action(it, 0.5f * it.width) }
+        override fun forEachImage(
+            action: (image: Image, offsetX: Float, imageScale: Float) -> Unit
+        ) {
+            leftSingle?.currentImage?.let { action(it, -0.5f * it.width * leftScale, leftScale) }
+            rightSingle?.currentImage?.let { action(it, 0.5f * it.width * rightScale, rightScale) }
         }
 
         override val hasUploadedImage: Boolean
@@ -969,9 +991,16 @@ open class ImagePage {
         private fun drawRenderSides(encoder: GPUCommandEncoder, dst: GPUTexture) {
             // As forEachPlacedImage: the page can have been evicted since the snapshot was taken.
             if (destroyed) return
-            forEachSide { side, offsetX ->
+            forEachSide { side, offsetX, sideScale ->
                 if (side is Render) {
-                    side.renderLoaded(encoder, x + offsetX / dst.width, y, scale, dst)
+                    // As forEachPlacedImage: render scales x/y by the scale it is given.
+                    side.renderLoaded(
+                        encoder,
+                        (x + offsetX / dst.width) / sideScale,
+                        y / sideScale,
+                        scale * sideScale,
+                        dst
+                    )
                 }
             }
         }
@@ -983,16 +1012,24 @@ open class ImagePage {
         /** That side's own rect, so a spread turns one real page rather than half of a sheet. */
         override fun leafRect(dst: GPUTexture, left: Boolean): FloatArray? {
             val side = (if (left) this.left else this.right) ?: return null
-            val placeX = x + (if (left) -0.5f else 0.5f) * side.width / dst.width
+            val sideScale = sideScale(side)
+            val placeX = x + (if (left) -0.5f else 0.5f) * sideWidth(side) / dst.width
             (side as? ImageSingle)?.currentImage?.let { image ->
-                if (image.mipmaps.isNotEmpty()) return image.placement(dst, placeX, y, scale)
+                if (image.mipmaps.isNotEmpty()) {
+                    return image.placement(
+                        dst,
+                        (placeX + WebGpuRenderer.offsetX) / sideScale - WebGpuRenderer.offsetX,
+                        (y + WebGpuRenderer.offsetY) / sideScale - WebGpuRenderer.offsetY,
+                        scale * sideScale
+                    )
+                }
             }
             // A Render side has no image to place, so measure its own declared size instead.
             if (side !is Render) return null
             val cx = 0.5f + scale * (placeX + WebGpuRenderer.offsetX)
             val cy = 0.5f + scale * (y + WebGpuRenderer.offsetY)
-            val hw = scale * 0.5f * side.width / dst.width
-            val hh = scale * 0.5f * side.height / dst.height
+            val hw = scale * 0.5f * sideWidth(side) / dst.width
+            val hh = scale * 0.5f * side.height * sideScale / dst.height
             return floatArrayOf(cx - hw, cy - hh, cx + hw, cy + hh)
         }
 
@@ -1036,11 +1073,11 @@ open class ImagePage {
         }
 
         override fun horizontalExtent(): Pair<Float, Float> =
-            (left?.width ?: 0).toFloat() to (right?.width ?: 0).toFloat()
+            sideWidth(left) to sideWidth(right)
 
         /** Total width (sum of both sides' widths) */
         override val width: Int
-            get() = (left?.width ?: 0) + (right?.width ?: 0)
+            get() = (sideWidth(left) + sideWidth(right)).roundToInt()
 
         /** Total height (max of both sides' heights) */
         override val height: Int
@@ -1056,12 +1093,14 @@ open class ImagePage {
                     leftSingle?.image?.let { it.width - (it.trim?.left ?: 0) } ?: left?.width ?: 0
                 val rightW =
                     rightSingle?.image?.let { it.trim?.right ?: it.width } ?: right?.width ?: 0
-                return leftW + rightW
+                return (leftW * leftScale + rightW * rightScale).roundToInt()
             }
 
         /** Visible height after trim (max of trim heights) */
         override val trimHeight: Int
-            get() = max(left?.trimHeight ?: 0, right?.trimHeight ?: 0)
+            get() = max(
+                (left?.trimHeight ?: 0) * leftScale, (right?.trimHeight ?: 0) * rightScale
+            ).roundToInt()
 
         override val isHalfWidth: Boolean
             get() = true

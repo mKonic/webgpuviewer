@@ -1,0 +1,77 @@
+name: Release
+
+# Releasing is tagging: a v<major>.<minor>.<patch> tag builds the AAR and publishes it, with the ivy
+# descriptor hosts resolve it through, as that tag's release.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and publish
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          # scripts/version.sh counts commits and describes against tags - a shallow clone gets both wrong.
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: 21
+          distribution: temurin
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Check the tag is the version
+        run: |
+          name=$(bash scripts/version.sh name)
+          [ "$name" = "$TAG" ] || { echo "scripts/version.sh reports $name, not $TAG"; exit 1; }
+          echo "Releasing $TAG, build $(bash scripts/version.sh code)"
+
+      - name: Clone androidx.webgpu
+        # settings.gradle.kts reads it from raw.githubusercontent.com, which refuses under load.
+        run: git clone --depth 1 https://github.com/mpreg-ca/androidx-webgpu-repo.git "$RUNNER_TEMP/androidx-webgpu-repo"
+
+      - name: Build
+        env:
+          ANDROIDX_WEBGPU_REPO: ${{ runner.temp }}/androidx-webgpu-repo
+        run: >
+          ./gradlew --init-script scripts/androidx-webgpu-local.init.gradle.kts
+          :library:assembleRelease :library:writeIvyDescriptor
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=${TAG#v}
+          mkdir -p dist
+          cp library/build/outputs/aar/library-release.aar "dist/webgpuviewer-$version.aar"
+          cp "library/build/outputs/ivy/ivy-$version.xml" dist/
+
+          # Everything since the previous release: the last semver tag, or before the first one the
+          # last release of the old 41-komikku.N line.
+          previous=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' "$TAG^" 2> /dev/null \
+            || git describe --tags --abbrev=0 --match '41-komikku.*' "$TAG^" 2> /dev/null || true)
+          git log --format='- %s' "${previous:+$previous..}$TAG" > notes.md
+
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" --title "$TAG" --notes-file notes.md dist/*
+          fi

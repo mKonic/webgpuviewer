@@ -33,6 +33,7 @@ import ca.mpreg.webgpuviewer.renderer.FormatKeyed
 import ca.mpreg.webgpuviewer.renderer.Hdr
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
+import ca.mpreg.webgpuviewer.renderer.setTransientBindGroup
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.blitCached
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.blitCachedRegion
 import ca.mpreg.webgpuviewer.transition.Transition.Companion.cacheLock
@@ -294,7 +295,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
             val regionPipeline = regionPipelines[format]
             pass.setPipeline(regionPipeline)
-            pass.setBindGroup(
+            pass.setTransientBindGroup(
                 0, WebGpuRenderer.device.createBindGroup(
                     GPUBindGroupDescriptor(
                         layout = regionPipeline.getBindGroupLayout(0), entries = arrayOf(
@@ -306,6 +307,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 )
             )
             pass.draw(6)
+            uniformBuffer.close()
         }
 
         private val blitSampler by lazy {
@@ -597,18 +599,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
          */
         internal fun beginClearedPass(
             encoder: GPUCommandEncoder, dst: GPUTexture
-        ): GPURenderPassEncoder = encoder.beginRenderPass(
-            GPURenderPassDescriptor(
-                colorAttachments = arrayOf(
-                    GPURenderPassColorAttachment(
-                        view = dst.createView(),
-                        loadOp = LoadOp.Clear,
-                        storeOp = StoreOp.Store,
-                        clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
+        ): GPURenderPassEncoder {
+            val targetView = dst.createView()
+            // The pass holds its own reference to its attachment, so ours can go at once.
+            return encoder.beginRenderPass(
+                GPURenderPassDescriptor(
+                    colorAttachments = arrayOf(
+                        GPURenderPassColorAttachment(
+                            view = targetView,
+                            loadOp = LoadOp.Clear,
+                            storeOp = StoreOp.Store,
+                            clearValue = GPUColor(0.0, 0.0, 0.0, 0.0)
+                        )
                     )
                 )
-            )
-        )
+            ).also { targetView.close() }
+        }
 
         /** Blit a cached texture into [pass] with an offset. Draws nothing if [cachedView] is null. */
         internal fun blitCached(
@@ -631,7 +637,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
             val blitPipeline = blitPipelines[format]
             pass.setPipeline(blitPipeline)
-            pass.setBindGroup(
+            pass.setTransientBindGroup(
                 0, WebGpuRenderer.device.createBindGroup(
                     GPUBindGroupDescriptor(
                         layout = blitPipeline.getBindGroupLayout(0), entries = arrayOf(
@@ -643,6 +649,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 )
             )
             pass.draw(6)
+            uniformBuffer.close()
         }
     }
 }

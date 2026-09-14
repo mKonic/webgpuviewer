@@ -87,12 +87,21 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     var isScaleAnimating: Boolean = false
 
     /**
-     * True while a plain (non-zoom) fling is scrolling. Tile generation shares the render thread
-     * with the frame, so it is held off while the camera moves fast. Separate from
-     * [isScaleAnimating] - different gestures, either can be true alone.
+     * True while a plain (non-zoom) fling is scrolling - also set for [animateScroll], a tap
+     * navigation's own scroll animation. Tile generation shares the render thread with the frame,
+     * so it is held off while the camera moves fast. Separate from [isScaleAnimating] - different
+     * gestures, either can be true alone.
      */
     @Volatile
     var isFlinging: Boolean = false
+
+    /**
+     * True while a one-or-more-finger drag is actively panning content (not yet released into a
+     * fling). Along with [isFlinging], marks real scroll [onViewport] reports against - unlike
+     * [animateSlideIn], whose [slideOffset] never touches [scrollY] at all.
+     */
+    @Volatile
+    var isPanning: Boolean = false
 
     /** Set while [restorePosition] walks pages, so its intermediate steps don't reach the app. */
     @Volatile
@@ -172,9 +181,10 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     /**
      * [readThrough] is the deepest page whose bottom has reached the viewport's; where
      * [onPageChange] means "reached this page", this means "read past it" - so the document's
-     * last page reads through exactly when its bottom comes on screen. Reported every frame, not
-     * on a change: an edge that loses a race is lost for good, so diff it yourself. Observation
-     * only - it never moves the scroll.
+     * last page reads through exactly when its bottom comes on screen. Reported every frame while
+     * [isFlinging] or [isPanning] - real scroll, not merely something else invalidating a frame -
+     * not on a change alone: an edge that loses a race is lost for good, so diff it yourself.
+     * Observation only - it never moves the scroll.
      */
     var onViewport: ((readThrough: ImagePage?) -> Unit)? = null
 
@@ -489,14 +499,20 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         if (!deltaPixels.isSane()) return
         animationJob?.cancel()
         animationJob = scope?.launch {
-            var lastValue = 0f
-            animate(
-                0f, deltaPixels, animationSpec = spring(
-                    stiffness = Spring.StiffnessMediumLow, visibilityThreshold = 0.002f
-                )
-            ) { value, _ ->
-                scrollBy(value - lastValue)
-                lastValue = value
+            isFlinging = true
+            try {
+                var lastValue = 0f
+                animate(
+                    0f, deltaPixels, animationSpec = spring(
+                        stiffness = Spring.StiffnessMediumLow, visibilityThreshold = 0.002f
+                    )
+                ) { value, _ ->
+                    scrollBy(value - lastValue)
+                    lastValue = value
+                    invalidate()
+                }
+            } finally {
+                isFlinging = false
                 invalidate()
             }
         }
@@ -528,7 +544,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     override fun captureRenderState(): Any {
         val snapshot = captureLocked()
 
-        onViewport?.runCatching { invoke(snapshot.readThrough) }
+        if (isFlinging || isPanning) onViewport?.runCatching { invoke(snapshot.readThrough) }
         return snapshot
     }
 

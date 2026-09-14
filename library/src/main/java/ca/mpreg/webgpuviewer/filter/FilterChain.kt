@@ -13,6 +13,7 @@ import androidx.webgpu.GPUTextureView
 import androidx.webgpu.TextureUsage
 import ca.mpreg.webgpuviewer.renderer.Hdr
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
+import ca.mpreg.webgpuviewer.renderer.destroyAndRelease
 
 /**
  * The output filter chain: the viewer draws its frame into an offscreen texture, each enabled
@@ -95,6 +96,9 @@ class FilterChain {
         var src: GPUTextureView = scene.view
         var width = surface.width
         var height = surface.height
+        // Views over the frame's swapchain texture, made here rather than pooled. The pass each one is
+        // attached to keeps its own reference, so ours goes once the chain has recorded everything.
+        val surfaceViews = ArrayList<GPUTextureView>(2)
 
         try {
             for (i in active.indices) {
@@ -111,7 +115,7 @@ class FilterChain {
 
                 val dstSlot = if (direct) null
                 else acquire(outWidth, outHeight, filter.outputFormat, filter.usesCompute)
-                val dst = dstSlot?.view ?: surface.createView()
+                val dst = dstSlot?.view ?: surface.createView().also { surfaceViews.add(it) }
 
                 filter.run(this, encoder, src, width, height, dst, outWidth, outHeight)
 
@@ -124,11 +128,12 @@ class FilterChain {
 
                 if (last && !direct) tailBlit.run(
                     this, encoder, src, width, height,
-                    surface.createView(), surface.width, surface.height
+                    surface.createView().also { surfaceViews.add(it) }, surface.width, surface.height
                 )
             }
         } finally {
             srcSlot?.let { it.inUse = false }
+            surfaceViews.forEach { it.close() }
             active.clear()
         }
     }
@@ -163,6 +168,15 @@ class FilterChain {
     private class Slot(val texture: GPUTexture, val view: GPUTextureView) {
         var inUse = false
         var lastFrame = Long.MIN_VALUE
+
+        /**
+         * Both handles are AutoCloseable over a Dawn object with no finalizer, so a dropped slot keeps its
+         * native texture and view until they are closed.
+         */
+        fun release() {
+            texture.destroyAndRelease()
+            view.close()
+        }
     }
 
     private val pool = HashMap<Long, ArrayList<Slot>>()
@@ -232,7 +246,7 @@ class FilterChain {
         slots.remove(slot)
         if (slots.isEmpty()) pool.remove(k)
         poolBytes -= slot.texture.width.toLong() * slot.texture.height * 4
-        slot.texture.destroy()
+        slot.release()
     }
 
     private fun releaseAll() {
@@ -241,7 +255,7 @@ class FilterChain {
     }
 
     private fun destroyPool() {
-        for (slots in pool.values) for (slot in slots) slot.texture.destroy()
+        for (slots in pool.values) for (slot in slots) slot.release()
         pool.clear()
         poolBytes = 0L
         sceneSlot = null

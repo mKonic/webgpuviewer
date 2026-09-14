@@ -1,5 +1,6 @@
 package ca.mpreg.webgpuviewer.renderer
 
+import android.annotation.SuppressLint
 import android.util.Log
 import android.view.Surface
 import androidx.webgpu.DeviceLostCallback
@@ -194,7 +195,7 @@ class WebGpuRenderer {
                                 )
                             },
                             uncapturedErrorCallbackExecutor = Executor(Runnable::run),
-                            requiredFeatures = requiredFeatures,
+                            requiredFeatures = @SuppressLint("WrongConstant") requiredFeatures,
                         )
                     )
                 } catch (e: Throwable) {

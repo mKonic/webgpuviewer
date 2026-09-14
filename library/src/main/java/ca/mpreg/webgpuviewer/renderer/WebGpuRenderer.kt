@@ -443,8 +443,12 @@ class WebGpuRenderer {
 
         val doCleanup: suspend () -> Unit = {
             mutex.withLock {
-                filters.cleanup()
-                surface?.close()
+                // Once the device is lost there is nothing to free, and calling into its objects
+                // crashed in native code.
+                if (!deviceLost) {
+                    filters.cleanup()
+                    surface?.close()
+                }
                 surface = null
                 // After the surface: Vulkan holds its own reference while its surface lives, so ours is the last.
                 if (window != 0L) {

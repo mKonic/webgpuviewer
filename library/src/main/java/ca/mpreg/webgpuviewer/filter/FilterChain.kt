@@ -163,6 +163,16 @@ class FilterChain {
     private class Slot(val texture: GPUTexture, val view: GPUTextureView) {
         var inUse = false
         var lastFrame = Long.MIN_VALUE
+
+        /**
+         * Both handles are AutoCloseable over a Dawn object with no finalizer, so a dropped slot keeps its
+         * native texture and view until they are closed. destroy() frees the memory, close() the handle.
+         */
+        fun release() {
+            texture.destroy()
+            texture.close()
+            view.close()
+        }
     }
 
     private val pool = HashMap<Long, ArrayList<Slot>>()
@@ -232,7 +242,7 @@ class FilterChain {
         slots.remove(slot)
         if (slots.isEmpty()) pool.remove(k)
         poolBytes -= slot.texture.width.toLong() * slot.texture.height * 4
-        slot.texture.destroy()
+        slot.release()
     }
 
     private fun releaseAll() {
@@ -241,7 +251,7 @@ class FilterChain {
     }
 
     private fun destroyPool() {
-        for (slots in pool.values) for (slot in slots) slot.texture.destroy()
+        for (slots in pool.values) for (slot in slots) slot.release()
         pool.clear()
         poolBytes = 0L
         sceneSlot = null

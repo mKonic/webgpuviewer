@@ -351,6 +351,7 @@ class Image private constructor(
         mipmaps.forEach { it.cleanup() }
         mipmaps.clear()
         _buffer?.destroy()
+        _buffer?.close()
         _buffer = null
     }
 

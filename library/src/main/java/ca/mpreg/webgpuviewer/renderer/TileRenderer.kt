@@ -415,14 +415,22 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * tile costing more than a batch's target is itself the hitch. A challenger needs
      * [TILE_SIZE_MARGIN] to win, since switching re-cuts every grid.
      *
-     * Frozen while [staged], because the sizes are then not comparable: the size in use is timed
-     * generating real tiles through the rescaler, every other size by [probeTileSize] without one.
-     * So the size in use reads as expensive, this switches away, and the size it switches to
-     * becomes expensive in turn - and every switch re-cuts every grid (see [drawCore]), which on
-     * screen is the high-quality tiles dropping out and back while only the scroll moves.
+     * The comparison between sizes is frozen while [staged], because the sizes are then not
+     * comparable: the size in use is timed generating real tiles through the rescaler, every other
+     * size by [probeTileSize] without one. So the size in use reads as expensive, this switches
+     * away, and the size it switches to becomes expensive in turn - and every switch re-cuts every
+     * grid (see [drawCore]), which on screen is the high-quality tiles dropping out and back while
+     * only the scroll moves.
+     *
+     * The step down is not part of that comparison and stays live while staged. It asks only
+     * whether the size in use costs more than a whole batch's budget - one number, measured the
+     * same way whether or not a rescaler ran - and it only ever descends, so it cannot oscillate
+     * the way the comparison would. Staged is also where it is needed most: [UpscalerArtCnn] adds
+     * nine compute dispatches to every tile, enough for one tile to outlast the frame it was meant
+     * to fit inside, and freezing this left the renderer no way down from a size it could not
+     * afford.
      */
     private fun reconsiderTileSize() {
-        if (staged) return
         val current = sizeIndex(preferredTileSize)
         if (current < 0 || tileSamples[current] < TILE_SIZE_SAMPLES) return
 
@@ -431,6 +439,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             invalidate()
             return
         }
+
+        if (staged) return
 
         var best = current
         var bestCost = costPerPixel(current)

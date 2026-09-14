@@ -350,8 +350,7 @@ class Image private constructor(
         releaseHdr()
         mipmaps.forEach { it.cleanup() }
         mipmaps.clear()
-        _buffer?.destroy()
-        _buffer?.close()
+        _buffer?.destroyAndRelease()
         _buffer = null
     }
 

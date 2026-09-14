@@ -198,12 +198,12 @@ class Mipmap(
         // reference alone leaks the native object: destroy() frees the memory, close() releases the handle.
         // tiles and tileViews only alias entries of textures and textureViews, so closing those twice would
         // release a handle that is already gone - they are just cleared.
-        tileUniforms?.forEach { it?.destroy(); it?.close() }
+        tileUniforms?.forEach { it?.destroyAndRelease() }
         tileUniforms = null
         textureViews.forEach { view -> view.close() }
         textureViews.clear()
         tileViews.clear()
-        textures.forEach { tex -> tex.destroy(); tex.close() }
+        textures.forEach { tex -> tex.destroyAndRelease() }
         textures.clear()
         tiles.clear()
     }

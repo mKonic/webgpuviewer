@@ -13,6 +13,7 @@ import androidx.webgpu.GPUTextureView
 import androidx.webgpu.TextureUsage
 import ca.mpreg.webgpuviewer.renderer.Hdr
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
+import ca.mpreg.webgpuviewer.renderer.destroyAndRelease
 
 /**
  * The output filter chain: the viewer draws its frame into an offscreen texture, each enabled
@@ -166,11 +167,10 @@ class FilterChain {
 
         /**
          * Both handles are AutoCloseable over a Dawn object with no finalizer, so a dropped slot keeps its
-         * native texture and view until they are closed. destroy() frees the memory, close() the handle.
+         * native texture and view until they are closed.
          */
         fun release() {
-            texture.destroy()
-            texture.close()
+            texture.destroyAndRelease()
             view.close()
         }
     }

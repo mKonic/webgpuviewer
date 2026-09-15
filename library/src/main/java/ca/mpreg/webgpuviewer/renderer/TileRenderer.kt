@@ -277,11 +277,24 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     /**
      * Drop every tile the outgoing rescaler produced and let go of what it held. On the worker,
      * which owns both the grids and a rescaler's textures.
+     *
+     * The cost measurements go with them. They were timed through the outgoing rescaler, so they
+     * describe a pipeline that no longer runs, and an exponential average needs twenty-odd tiles
+     * per size to forget one. Kept, they steer [reconsiderTileSize] and [nextBatchSize] the whole
+     * time, and it cuts both ways: a swap to a cheaper rescaler reads as expensive and shrinks the
+     * tiles for nothing, while a swap to a dearer one reads as affordable through exactly the
+     * window its first tiles land in. [preferredTileSize] goes back with them, since nothing
+     * measured justifies the size the outgoing rescaler settled on and the grids are being re-cut
+     * here anyway.
      */
     private fun replaceRescaler(previous: Rescaler) {
         workerScope.launch {
             pages.values.forEach { releaseTiles(it) }
             previous.cleanup()
+            tileCostNs.fill(0.0)
+            tileSamples.fill(0)
+            tileOverheadNs = 0.0
+            preferredTileSize = TILE_SIZE
             invalidate()
         }
     }

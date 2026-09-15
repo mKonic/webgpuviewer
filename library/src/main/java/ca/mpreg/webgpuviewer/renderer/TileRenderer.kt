@@ -188,10 +188,15 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         /** FrameParams: snap, dst_size, clip, then ts and the atlas's side. */
         private const val FRAME_UNIFORM_BYTES = 48L
 
-        /** What one [TILE_SIZE] tile costs, and the range the derived cache is held to. */
+        /** What one [TILE_SIZE] tile costs. The range around it is the device's - [DeviceMemory]. */
         private const val TILE_BYTES = TILE_SIZE * TILE_SIZE * 4
-        private const val MIN_CACHE_BYTES = 16 * 1024 * 1024
-        private const val MAX_CACHE_BYTES = 64 * 1024 * 1024
+
+        /**
+         * Atlas side to fall back on when the device will not say what it allows. WebGPU
+         * guarantees 8192, but compatibility mode can lower it, and this is what the old fixed
+         * 64 MB ceiling came to anyway - so falling back here changes nothing that used to work.
+         */
+        private const val FALLBACK_MAX_TEXTURE_SIDE = 4096
 
         /**
          * Score threshold [nextRequest] uses to tell a genuinely on-screen tile request from one
@@ -208,13 +213,33 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         private val device get() = WebGpuRenderer.device
 
         private val timestampsSupported = device.hasFeature(FeatureName.TimestampQuery)
+
+        /**
+         * The widest 2D texture this device will allocate. The atlas is one square texture, and a
+         * budget scaled to a device with plenty of memory can ask for a side past this - which
+         * fails the allocation outright rather than yielding a smaller one, so [atlasSide] clamps
+         * to it instead of finding out.
+         */
+        private val maxTextureSide: Int by lazy {
+            try {
+                device.getLimits().maxTextureDimension2D
+            } catch (e: Throwable) {
+                Log.w(TAG, "could not read the device's texture limit", e)
+                FALLBACK_MAX_TEXTURE_SIDE
+            }
+        }
     }
 
     /**
      * Screens' worth of tiles to cache - the count itself follows the viewport ([budgetTiles]).
-     * 1.5 is what a flat 192 came to at 1440p.
+     * 1.5 is what a flat 192 came to at 1440p, and still what a device that cannot say how much
+     * memory it has gets; [DeviceMemory] raises it on one with room to spare.
+     *
+     * Read through rather than copied: a [TileRenderer] is built with the viewer state, which is
+     * before the view owning it is attached and so before [DeviceMemory] has a device to answer
+     * for. A value captured here would always be the fallback.
      */
-    var cacheScreens = 1.5f
+    private val cacheScreens get() = DeviceMemory.cacheScreens
 
     // The viewport the last draw saw - what the cache is sized against.
     private var viewportWidth = 0
@@ -223,13 +248,15 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     // [budgetTiles] when the atlas was built - one fixed allocation, so the budget from then on.
     private var atlasBudgetTiles = 0
 
-    /** [cacheScreens] screens at [TILE_SIZE], ring included, within the cache byte range. */
+    /** [cacheScreens] screens at [TILE_SIZE], ring included, within the device's byte range. */
     private fun budgetTiles(): Int {
-        if (viewportWidth <= 0 || viewportHeight <= 0) return MIN_CACHE_BYTES / TILE_BYTES
+        val floor = DeviceMemory.cacheFloorBytes / TILE_BYTES
+        if (viewportWidth <= 0 || viewportHeight <= 0) return floor
         val cols = ceil(viewportWidth / TILE_SIZE.toFloat()).toInt() + 2
         val rows = ceil(viewportHeight / TILE_SIZE.toFloat()).toInt() + 2
+        // max() around the ceiling only so a budget can never be asked to fall in an empty range.
         return (cols * rows * cacheScreens).toInt()
-            .coerceIn(MIN_CACHE_BYTES / TILE_BYTES, MAX_CACHE_BYTES / TILE_BYTES)
+            .coerceIn(floor, max(floor, DeviceMemory.cacheCeilingBytes / TILE_BYTES))
     }
 
     /**
@@ -634,13 +661,24 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         get() = atlasOrNull
             ?: TileAtlas(atlasSide(), Hdr.frameFormat).also { atlasOrNull = it }
 
-    /** Square, whole slabs, big enough for [budgetTiles] tiles of [TILE_SIZE]. */
+    /**
+     * Square, whole slabs, big enough for [budgetTiles] tiles of [TILE_SIZE] - or as close to it
+     * as [maxTextureSide] allows.
+     *
+     * [atlasBudgetTiles] ends up at what the side actually holds rather than at what was asked
+     * for. That budget is also the eviction cap, so leaving it above the number of slots that
+     * exist would have the cache believing it had room the atlas was never given.
+     */
     private fun atlasSide(): Int {
-        val budget = budgetTiles()
-        atlasBudgetTiles = budget
         val perSlab = (SLAB_SIZE / TILE_SIZE) * (SLAB_SIZE / TILE_SIZE)
+        val budget = budgetTiles()
         val slabs = (budget + perSlab - 1) / perSlab
-        return ceil(sqrt(slabs.toFloat())).toInt().coerceAtLeast(1) * SLAB_SIZE
+        val wanted = ceil(sqrt(slabs.toFloat())).toInt().coerceAtLeast(1) * SLAB_SIZE
+        // Down to whole slabs: a partial one carries no usable slots.
+        val side = min(wanted, maxTextureSide / SLAB_SIZE * SLAB_SIZE).coerceAtLeast(SLAB_SIZE)
+        val perSide = side / SLAB_SIZE
+        atlasBudgetTiles = min(budget, perSide * perSide * perSlab)
+        return side
     }
 
     private fun newGrid(page: ImagePage.ImageSingle, pageScale: Float) = PageTiles(

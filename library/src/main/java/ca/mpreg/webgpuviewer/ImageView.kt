@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.AttributeSet
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.AbstractComposeView
+import ca.mpreg.webgpuviewer.renderer.DeviceMemory
 import ca.mpreg.webgpuviewer.renderer.Hdr
 import ca.mpreg.webgpuviewer.renderer.Thermals
 import ca.mpreg.webgpuviewer.viewer.ImageViewer
@@ -32,12 +33,14 @@ open class ImageView(
         // drops it with the last. Held all session, it ramps panel brightness on SDR reading.
         Hdr.attachColorModeHost(this)
         Thermals.attachHost(this)
+        DeviceMemory.attachHost(this)
     }
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
         Hdr.attachColorModeHost(null)
         Thermals.attachHost(null)
+        DeviceMemory.attachHost(null)
     }
 
     override fun onWindowFocusChanged(hasWindowFocus: Boolean) {

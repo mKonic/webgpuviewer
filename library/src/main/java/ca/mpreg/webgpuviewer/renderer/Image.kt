@@ -114,26 +114,28 @@ class Image private constructor(
                 // is a display question, and the base has to survive intact for the SDR case.
                 gainmap != null && canHdr -> {
                     pixels = withContext(Dispatchers.Default) {
-                        ImageUtil.applyGainmap(
-                            base = pixels,
-                            width = width,
-                            height = height,
-                            gain = gainmap.pixels,
-                            gainWidth = gainmap.width,
-                            gainHeight = gainmap.height,
-                            gainChannels = gainmap.channels,
-                            gamma = gainmap.gamma,
-                            minContentBoost = gainmap.minContentBoost,
-                            maxContentBoost = gainmap.maxContentBoost,
-                            offsetSdr = gainmap.offsetSdr,
-                            offsetHdr = gainmap.offsetHdr,
-                            // Scaled so the map's full boost lands on what is actually being
-                            // presented, instead of wherever the file aimed.
-                            weight = Hdr.peakWeight(
-                                gainmap.minHeadroomStops,
-                                gainmap.headroomStops
-                            ),
-                        )
+                        traced("wgv:gainmap") {
+                            ImageUtil.applyGainmap(
+                                base = pixels,
+                                width = width,
+                                height = height,
+                                gain = gainmap.pixels,
+                                gainWidth = gainmap.width,
+                                gainHeight = gainmap.height,
+                                gainChannels = gainmap.channels,
+                                gamma = gainmap.gamma,
+                                minContentBoost = gainmap.minContentBoost,
+                                maxContentBoost = gainmap.maxContentBoost,
+                                offsetSdr = gainmap.offsetSdr,
+                                offsetHdr = gainmap.offsetHdr,
+                                // Scaled so the map's full boost lands on what is actually being
+                                // presented, instead of wherever the file aimed.
+                                weight = Hdr.peakWeight(
+                                    gainmap.minHeadroomStops,
+                                    gainmap.headroomStops
+                                ),
+                            )
+                        }
                     }
                     keepHdr = true
                     // What the pixels reach, not what was asked for: a map that fits inside the
@@ -153,7 +155,9 @@ class Image private constructor(
                 hdr && canHdr -> {
                     keepHdr = true
                     val peak = withContext(Dispatchers.Default) {
-                        ImageUtil.scaleHdrPeakNative(pixels, width, height, Hdr.presentPeak)
+                        traced("wgv:hdrPeak") {
+                            ImageUtil.scaleHdrPeakNative(pixels, width, height, Hdr.presentPeak)
+                        }
                     }
                     headroom = log2(peak.coerceAtLeast(1f))
                 }
@@ -161,7 +165,7 @@ class Image private constructor(
                 // Float pixels with nowhere to put them: tone map once, at upload.
                 hdr -> {
                     pixels = withContext(Dispatchers.Default) {
-                        ImageUtil.toneMapToSdr(pixels, width, height)
+                        traced("wgv:toneMap") { ImageUtil.toneMapToSdr(pixels, width, height) }
                     }
                     headroom = 0f
                 }
@@ -222,14 +226,16 @@ class Image private constructor(
                 val sdrPixels = when {
                     !keepHdr -> pixels
                     trimWith != null || wantsBackgroundProbe ->
-                        ImageUtil.toneMapToSdr(pixels, width, height)
+                        traced("wgv:toneMap") { ImageUtil.toneMapToSdr(pixels, width, height) }
 
                     else -> null
                 }
 
                 if (trimWith != null && sdrPixels != null) {
                     // Find trim for each color and pick the smallest rect
-                    val rects = Trim.findAllCpu(sdrPixels, width, height, trimWith, trimThreshold)
+                    val rects = traced("wgv:trim") {
+                        Trim.findAllCpu(sdrPixels, width, height, trimWith, trimThreshold)
+                    }
                     val best =
                         trimWith.zip(rects).minByOrNull { it.second.width() * it.second.height() }
 
@@ -250,8 +256,9 @@ class Image private constructor(
                 if (backgroundColor != null) {
                     image.backgroundColor = backgroundColor
                 } else if (!backgroundFromTrim && sdrPixels != null) {
-                    image.backgroundColor =
+                    image.backgroundColor = traced("wgv:background") {
                         Trim.detectBackgroundCpu(sdrPixels, width, height, trimThreshold)
+                    }
                 }
             }
 
@@ -277,8 +284,13 @@ class Image private constructor(
                     Log.d("Renderer", "Create mipmap using CPU ${scale} ${newWidth} ${newHeight}")
 
                     currentPixels = withContext(Dispatchers.Default) {
-                        if (keepHdr) ImageUtil.resizeF16(currentPixels, textureWidth, textureHeight)
-                        else ImageUtil.resize(currentPixels, textureWidth, textureHeight)
+                        traced("wgv:mipResize") {
+                            if (keepHdr) {
+                                ImageUtil.resizeF16(currentPixels, textureWidth, textureHeight)
+                            } else {
+                                ImageUtil.resize(currentPixels, textureWidth, textureHeight)
+                            }
+                        }
                     }
                     mipmapDataList.add(MipmapData(currentPixels, newWidth, newHeight, scale))
                     textureWidth = newWidth

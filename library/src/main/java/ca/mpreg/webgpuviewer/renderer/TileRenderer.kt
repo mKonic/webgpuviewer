@@ -1285,18 +1285,20 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         scale: Float
     ): Boolean {
         val a = pagedAnchor(page, dst, x, y, scale)
-        val covered = drawCore(
-            pass,
-            page,
-            dst,
-            a.anchorX,
-            a.anchorY,
-            0f,
-            a.pageScale,
-            page.isScaleAnimating,
-            applyRetainWindow = true,
-            useStencilMask = true
-        )
+        val covered = traced("wgv:tilesDraw") {
+            drawCore(
+                pass,
+                page,
+                dst,
+                a.anchorX,
+                a.anchorY,
+                0f,
+                a.pageScale,
+                page.isScaleAnimating,
+                applyRetainWindow = true,
+                useStencilMask = true
+            )
+        }
         // Never "covered" off a pinned grid: it sits at the animation's target, so the live draw
         // is the only thing showing the page where it is mid-animation.
         return covered && !a.pinned
@@ -1327,18 +1329,20 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     ): Boolean {
         val a = continuousAnchor(page, dst, cameraDocY, docTop, pageHeight, viewerOffsetX, scale)
             ?: return false
-        return drawCore(
-            pass,
-            page,
-            dst,
-            a.anchorX,
-            a.anchorY,
-            a.centerYOffset,
-            a.pageScale,
-            suppressGeneration,
-            applyRetainWindow = false,
-            useStencilMask = true
-        )
+        return traced("wgv:tilesDraw") {
+            drawCore(
+                pass,
+                page,
+                dst,
+                a.anchorX,
+                a.anchorY,
+                a.centerYOffset,
+                a.pageScale,
+                suppressGeneration,
+                applyRetainWindow = false,
+                useStencilMask = true
+            )
+        }
     }
 
     /**
@@ -1673,7 +1677,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                         val req = nextRequest() ?: break
                         try {
                             val started = System.nanoTime()
-                            generate(req, this)?.let {
+                            traced("wgv:tile") { generate(req, this) }?.let {
                                 measurements.add(it)
                                 // Only a tile that really submitted - a no-op would drag the
                                 // average toward nothing.
@@ -1822,7 +1826,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                 } finally {
                     pass.endAndRelease()
                 }
-                rescaler.encode(encoder, size)
+                traced("wgv:rescale") { rescaler.encode(encoder, size) }
             },
         ) { pass, _ ->
             rescaler.resolve(pass, atlas.format)
@@ -1942,7 +1946,11 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
         val toGenerate = st.pending.toList()
         st.pending.clear()
-        toGenerate.forEach { tkey -> generateTileNow(st, (tkey shr 32).toInt(), tkey.toInt()) }
+        traced("wgv:tilesNow") {
+            toGenerate.forEach { tkey ->
+                generateTileNow(st, (tkey shr 32).toInt(), tkey.toInt())
+            }
+        }
 
         // Only what just landed: premultiplied-over, so drawing a tile twice differs from once.
         drawTiles(pass, dst.format, st, toGenerate)

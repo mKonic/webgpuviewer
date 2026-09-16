@@ -613,8 +613,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         scale: Float,
         variant: Variant
     ) {
-        for (tile in image.prepareTilesForRender(dst, x, y, scale)) {
-            drawTile(pass, dst, tile, variant)
+        traced("wgv:fastDraw") {
+            for (tile in image.prepareTilesForRender(dst, x, y, scale)) {
+                drawTile(pass, dst, tile, variant)
+            }
         }
     }
 

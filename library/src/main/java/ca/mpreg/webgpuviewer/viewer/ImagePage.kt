@@ -36,6 +36,7 @@ import ca.mpreg.webgpuviewer.renderer.RenderPage
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.endAndRelease
+import ca.mpreg.webgpuviewer.renderer.traced
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -676,9 +677,11 @@ open class ImagePage {
             if (!linear || !masked) {
                 drawPageBackground(pass, dst, scale, maskedBackground = masked)
             }
-            forEachPlacedImage(dst, x, y, scale) { image, _, placeX, placeY, placeScale ->
-                for (tile in image.prepareTilesForRender(dst, placeX, placeY, placeScale)) {
-                    RenderPage.drawTile(pass, dst, tile, variant)
+            traced("wgv:fastDraw") {
+                forEachPlacedImage(dst, x, y, scale) { image, _, placeX, placeY, placeScale ->
+                    for (tile in image.prepareTilesForRender(dst, placeX, placeY, placeScale)) {
+                        RenderPage.drawTile(pass, dst, tile, variant)
+                    }
                 }
             }
         }

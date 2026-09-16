@@ -381,7 +381,7 @@ class WebGpuRenderer {
             }
 
             val current = try {
-                surface.getCurrentTexture()
+                traced("wgv:acquire") { surface.getCurrentTexture() }
             } catch (e: Exception) {
                 Log.w("WebGpuRenderer", "Failed to get current texture", e)
                 return FrameResult.Retry
@@ -406,9 +406,11 @@ class WebGpuRenderer {
                 // Draws into an offscreen texture when filters are enabled; endFrame runs them
                 // over it and lands the result on the swapchain.
                 fn(encoder, filters.beginFrame(texture))
-                filters.endFrame(encoder, texture)
-                device.queue.submitAndRelease(encoder)
-                surface.present()
+                traced("wgv:submit") {
+                    filters.endFrame(encoder, texture)
+                    device.queue.submitAndRelease(encoder)
+                }
+                traced("wgv:present") { surface.present() }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

@@ -33,6 +33,7 @@ import ca.mpreg.webgpuviewer.renderer.UpscalerArtCnn
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer.Companion.dispatcher
 import ca.mpreg.webgpuviewer.renderer.endAndRelease
+import ca.mpreg.webgpuviewer.renderer.traced
 import ca.mpreg.webgpuviewer.transition.Transition
 import ca.mpreg.webgpuviewer.transition.TransitionBasic
 import kotlinx.coroutines.CoroutineScope
@@ -287,7 +288,7 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
             // Drop the wake this frame's invalidate left, or going idle costs a spurious one.
             renderWake.tryReceive()
             // Captured here, drawn on the GPU thread below - see this function's doc.
-            val snapshot = captureRenderState() ?: continue
+            val snapshot = traced("wgv:capture") { captureRenderState() } ?: continue
             drawing = launch(dispatcher) {
                 when (renderer.render { encoder, texture ->
                     renderSnapshot(encoder, texture, snapshot)
@@ -391,13 +392,16 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
         val page = s.currentPage
 
         if (s.adjacentPage != null && s.offset != 0f) {
-            s.transition.render(
-                page, s.adjacentPage, encoder, texture, s.offset, s.firstPos, s.currentPos, tiles
-            )
+            traced("wgv:transition") {
+                s.transition.render(
+                    page, s.adjacentPage, encoder, texture, s.offset, s.firstPos, s.currentPos,
+                    tiles
+                )
+            }
             return
         }
 
-        val covered = page.drawLive(encoder, texture, tiles)
+        val covered = traced("wgv:pageDraw") { page.drawLive(encoder, texture, tiles) }
 
         // Once the current page's tiles settle, prewarm the next page's, so a transition into it
         // starts mostly sharp. Gated on atHome: the tile cache is keyed by (x, y, scale).

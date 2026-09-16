@@ -96,32 +96,36 @@ class Mipmap(
 
                 // Unyielded driver work - not on the back of the chunk just uploaded.
                 yield()
-                val texture = device.createTexture(
-                    GPUTextureDescriptor(
-                        size = GPUExtent3D(tileWidth, tileHeight),
-                        format = format,
-                        usage = TextureUsage.TextureBinding or TextureUsage.CopyDst or TextureUsage.RenderAttachment,
+                val texture = traced("wgv:mipTexture") {
+                    device.createTexture(
+                        GPUTextureDescriptor(
+                            size = GPUExtent3D(tileWidth, tileHeight),
+                            format = format,
+                            usage = TextureUsage.TextureBinding or TextureUsage.CopyDst or TextureUsage.RenderAttachment,
+                        )
                     )
-                )
+                }
 
                 var row = 0
                 while (row < tileHeight) {
                     val rows = min(rowsPerChunk, tileHeight - row)
 
-                    device.queue.writeTexture(
-                        dataLayout = GPUTexelCopyBufferLayout(
-                            // Long arithmetic: y * width overflows Int well before the byte
-                            // offset does on a large page.
-                            offset = ((y + row).toLong() * width + x) * bytesPerPixel,
-                            bytesPerRow = width * bytesPerPixel,
-                            rowsPerImage = height,
-                        ),
-                        data = pixels,
-                        destination = GPUTexelCopyTextureInfo(
-                            texture = texture, origin = GPUOrigin3D(y = row)
-                        ),
-                        writeSize = GPUExtent3D(tileWidth, rows),
-                    )
+                    traced("wgv:mipUpload") {
+                        device.queue.writeTexture(
+                            dataLayout = GPUTexelCopyBufferLayout(
+                                // Long arithmetic: y * width overflows Int well before the byte
+                                // offset does on a large page.
+                                offset = ((y + row).toLong() * width + x) * bytesPerPixel,
+                                bytesPerRow = width * bytesPerPixel,
+                                rowsPerImage = height,
+                            ),
+                            data = pixels,
+                            destination = GPUTexelCopyTextureInfo(
+                                texture = texture, origin = GPUOrigin3D(y = row)
+                            ),
+                            writeSize = GPUExtent3D(tileWidth, rows),
+                        )
+                    }
 
                     row += rows
                     yield()

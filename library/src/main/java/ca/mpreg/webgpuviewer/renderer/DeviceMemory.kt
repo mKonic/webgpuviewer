@@ -31,6 +31,7 @@ object DeviceMemory {
         val screens: Float,
         val floorBytes: Int,
         val ceilingBytes: Int,
+        val animatedBytes: Int,
     )
 
     /** What the renderer used at every size before this existed, and the fallback throughout. */
@@ -38,6 +39,7 @@ object DeviceMemory {
         screens = 1.5f,
         floorBytes = 16 * MB,
         ceilingBytes = 64 * MB,
+        animatedBytes = 64 * MB,
     )
 
     /**
@@ -50,10 +52,10 @@ object DeviceMemory {
      * which is exactly where a fixed floor was worst.
      */
     private fun budgetFor(totalBytes: Long, lowRam: Boolean): Budget = when {
-        lowRam || totalBytes < 3 * GB -> Budget(1f, 8 * MB, 32 * MB)
+        lowRam || totalBytes < 3 * GB -> Budget(1f, 8 * MB, 32 * MB, 32 * MB)
         totalBytes < 6 * GB -> DEFAULT
-        totalBytes < 10 * GB -> Budget(2f, 16 * MB, 96 * MB)
-        else -> Budget(2.5f, 16 * MB, 128 * MB)
+        totalBytes < 10 * GB -> Budget(2f, 16 * MB, 96 * MB, 128 * MB)
+        else -> Budget(2.5f, 16 * MB, 128 * MB, 192 * MB)
     }
 
     @Volatile
@@ -88,4 +90,17 @@ object DeviceMemory {
 
     /** The high end of it - see [TileRenderer.budgetTiles]. */
     val cacheCeilingBytes: Int get() = budget.ceilingBytes
+
+    /**
+     * What one animated page may hold in decoded frames.
+     *
+     * Every frame of an animated page is a full-resolution texture - they are built without
+     * mipmaps, so there is no smaller level to fall back on - and all of them stay resident for
+     * as long as the page is cached. A 1000x1500 page at sixty frames is a third of a gigabyte
+     * of GPU memory for one page, which is a crash rather than a slow reader.
+     *
+     * Generous on purpose: ordinary animated content is nowhere near it, so the cap costs normal
+     * reading nothing and only bites on the page that would otherwise take the app down.
+     */
+    val animatedPageBytes: Int get() = budget.animatedBytes
 }

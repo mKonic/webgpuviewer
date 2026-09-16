@@ -443,7 +443,10 @@ class Image private constructor(
         val uniform: GPUBuffer,
         val x: Float,
         val y: Float,
-        val scale: Float
+        val scale: Float,
+        /** Where its bind groups are kept - see [Mipmap.tileBindGroup]. */
+        internal val mipmap: Mipmap,
+        internal val index: Int,
     )
 
     /**
@@ -481,7 +484,9 @@ class Image private constructor(
                 tile.uniform,
                 (0.5f / scale + adjustedX) * mipmap.scale + (tile.x - 0.5f * mipmap.width) / dst.width,
                 (0.5f / scale + adjustedY) * mipmap.scale + (tile.y - 0.5f * mipmap.height) / dst.height,
-                scale / mipmap.scale
+                scale / mipmap.scale,
+                mipmap,
+                tile.index,
             )
         }
     }

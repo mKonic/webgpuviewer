@@ -2,10 +2,14 @@ package ca.mpreg.webgpuviewer.renderer
 
 import android.util.Log
 import androidx.webgpu.BufferUsage
+import androidx.webgpu.GPUBindGroup
+import androidx.webgpu.GPUBindGroupDescriptor
+import androidx.webgpu.GPUBindGroupEntry
 import androidx.webgpu.GPUBuffer
 import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUExtent3D
 import androidx.webgpu.GPUOrigin3D
+import androidx.webgpu.GPURenderPipeline
 import androidx.webgpu.GPUTexelCopyBufferLayout
 import androidx.webgpu.GPUTexelCopyTextureInfo
 import androidx.webgpu.GPUTexture
@@ -202,6 +206,8 @@ class Mipmap(
         // reference alone leaks the native object: destroy() frees the memory, close() releases the handle.
         // tiles and tileViews only alias entries of textures and textureViews, so closing those twice would
         // release a handle that is already gone - they are just cleared.
+        tileBindGroups.values.forEach { groups -> groups.forEach { it?.close() } }
+        tileBindGroups.clear()
         tileUniforms?.forEach { it?.destroyAndRelease() }
         tileUniforms = null
         textureViews.forEach { view -> view.close() }
@@ -246,13 +252,15 @@ class Mipmap(
     /**
      * One tile overlapping a queried rect, at its own pixel offset within the mipmap. [uniform] is
      * its own persistent placement buffer - see [tileUniforms] for why it needs one of its own.
+     * [index] is its place in this mipmap's grid, for [tileBindGroup].
      */
     class TileRect(
         val texture: GPUTexture,
         val view: GPUTextureView,
         val x: Int,
         val y: Int,
-        val uniform: GPUBuffer
+        val uniform: GPUBuffer,
+        internal val index: Int,
     )
 
     /**
@@ -268,6 +276,28 @@ class Mipmap(
         return arr[index] ?: device.createBuffer(
             GPUBufferDescriptor(size = 32, usage = BufferUsage.Uniform or BufferUsage.CopyDst)
         ).also { arr[index] = it }
+    }
+
+    /**
+     * Tile bind groups by the pipeline that draws them, then by tile. Everything one binds - the
+     * tile's view and its [tileUniforms] buffer - lives as long as this level, so a group built on
+     * a tile's first draw serves every frame after instead of one being made and dropped per draw.
+     * By pipeline because a group built against a pipeline's own layout fits only that pipeline,
+     * and a tile can be drawn by several: masked or not, linear or not, into either target format.
+     */
+    private val tileBindGroups = HashMap<GPURenderPipeline, Array<GPUBindGroup?>>(2)
+
+    /** The group [pipeline] draws tile [index] with. On the render thread, like [tileUniformFor]. */
+    internal fun tileBindGroup(index: Int, pipeline: GPURenderPipeline): GPUBindGroup {
+        val groups = tileBindGroups.getOrPut(pipeline) { arrayOfNulls(textures.size) }
+        return groups[index] ?: device.createBindGroup(
+            GPUBindGroupDescriptor(
+                layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
+                    GPUBindGroupEntry(0, buffer = tileUniformFor(index)),
+                    GPUBindGroupEntry(1, textureView = textureViews[index]),
+                )
+            )
+        ).also { groups[index] = it }
     }
 
     /**
@@ -297,7 +327,8 @@ class Mipmap(
                         textureViews[idx],
                         col * tilesize,
                         row * tilesize,
-                        tileUniformFor(idx)
+                        tileUniformFor(idx),
+                        idx,
                     )
                 )
             }

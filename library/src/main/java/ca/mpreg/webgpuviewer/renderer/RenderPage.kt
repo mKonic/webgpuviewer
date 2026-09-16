@@ -681,16 +681,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // samplerVariant's stencil test reads against 1 - see [TileRenderer.blitPipelineStencilWrite],
         // the only thing that ever writes this attachment.
         if (variant === samplerVariant) pass.setStencilReference(1)
-        pass.setTransientBindGroup(
-            0, device.createBindGroup(
-                GPUBindGroupDescriptor(
-                    layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
-                        GPUBindGroupEntry(0, buffer = tile.uniform),
-                        GPUBindGroupEntry(1, textureView = tile.view),
-                    )
-                )
-            )
-        )
+        pass.setBindGroup(0, tile.mipmap.tileBindGroup(tile.index, pipeline))
         pass.draw(6)
     }
 }

@@ -8,6 +8,7 @@
 
 #include "check.h"
 
+#include <cstring>
 #include <vector>
 
 namespace {
@@ -79,6 +80,36 @@ TEST(srgbByteEncodeCoversTheRange) {
   // Clamps rather than wrapping.
   CHECK_EQ(static_cast<int>(srgb_encode_u8(-1.0f)), 0);
   CHECK_EQ(static_cast<int>(srgb_encode_u8(4.0f)), 255);
+}
+
+// --- resize ------------------------------------------------------------------------------------
+
+TEST(decodeTableMatchesTheTransferForEveryHalf) {
+  const float *table = srgb_decode_half_table();
+  int mismatches = 0;
+  for (int i = 0; i <= 0xFFFF; ++i) {
+    const float expected = srgb_decode(half_to_float(static_cast<uint16_t>(i)));
+    // Bitwise, so a NaN has to come back as the same NaN.
+    if (std::memcmp(&table[i], &expected, sizeof expected) != 0) ++mismatches;
+  }
+  CHECK_EQ(mismatches, 0);
+}
+
+TEST(resizeF16IsTheSameInBandsAsInOnePass) {
+  const int w = 1027, h = 1203;
+  std::vector<uint16_t> src(static_cast<size_t>(w) * h * 4);
+  uint32_t state = 12345;
+  for (uint16_t &v : src) {
+    state = state * 1664525u + 1013904223u;
+    v = static_cast<uint16_t>(state >> 16);
+  }
+  CHECK(chooseThreadCount(w / 2, h / 2) > 1 || std::thread::hardware_concurrency() <= 1);
+
+  std::vector<uint16_t> banded(static_cast<size_t>(w / 2) * (h / 2) * 4);
+  std::vector<uint16_t> single(banded.size());
+  resize_f16(src.data(), banded.data(), w, h);
+  resize_f16_rows(src.data(), single.data(), w, w / 2, srgb_decode_half_table(), 0, h / 2);
+  CHECK(banded == single);
 }
 
 // --- tone mapping ------------------------------------------------------------------------------

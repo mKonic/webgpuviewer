@@ -7,6 +7,9 @@
 #include <cstring>
 #include <jni.h>
 #include <stdint.h>
+#include <vector>
+
+#include "bands.h"
 
 /* ------------------------------------------------------------ buffer guard */
 
@@ -130,8 +133,80 @@ static inline uint8_t srgb_encode_u8(float linear) {
 
 /* --------------------------------------------------------------- resize */
 
+/* srgb_decode(half_to_float(h)) for every half, so the resize does not pay a
+ * pow per channel per sample. Exact: a half has only 65536 values. */
+static const float *srgb_decode_half_table() {
+  static const std::vector<float> table = [] {
+    std::vector<float> values(65536);
+    for (size_t h = 0; h < values.size(); ++h)
+      values[h] = srgb_decode(half_to_float((uint16_t)h));
+    return values;
+  }();
+  return table.data();
+}
+
+/* Rows [y0, y1) of the destination. */
+static void resize_f16_rows(const uint16_t *src, uint16_t *dst, int srcWidth,
+                            int dstWidth, const float *decode, int y0,
+                            int y1) {
+  for (int y = y0; y < y1; ++y) {
+    const uint16_t *row0 = src + (size_t)(y * 2) * srcWidth * 4;
+    const uint16_t *row1 = src + (size_t)(y * 2 + 1) * srcWidth * 4;
+    uint16_t *q = dst + (size_t)y * dstWidth * 4;
+
+    for (int x = 0; x < dstWidth; ++x) {
+      const uint16_t *p[4] = {
+          row0 + (size_t)(x * 2) * 4,
+          row0 + (size_t)(x * 2 + 1) * 4,
+          row1 + (size_t)(x * 2) * 4,
+          row1 + (size_t)(x * 2 + 1) * 4,
+      };
+
+      float sumR = 0.0f, sumG = 0.0f, sumB = 0.0f, sumA = 0.0f;
+
+      for (int i = 0; i < 4; ++i) {
+        float a = half_to_float(p[i][3]);
+        sumR += decode[p[i][0]] * a;
+        sumG += decode[p[i][1]] * a;
+        sumB += decode[p[i][2]] * a;
+        sumA += a;
+      }
+
+      float outR = 0.0f, outG = 0.0f, outB = 0.0f;
+      float outA = sumA * 0.25f;
+
+      if (sumA > 0.00001f) {
+        float inv = 1.0f / sumA;
+        outR = sumR * inv;
+        outG = sumG * inv;
+        outB = sumB * inv;
+      }
+
+      q[0] = float_to_half(srgb_encode(outR));
+      q[1] = float_to_half(srgb_encode(outG));
+      q[2] = float_to_half(srgb_encode(outB));
+      q[3] = float_to_half(outA);
+      q += 4;
+    }
+  }
+}
+
 /* resize.cpp's box filter without the clamp to 1.0, which would throw away
- * every highlight. */
+ * every highlight. [dst] holds half of each dimension, rounded down. */
+static void resize_f16(const uint16_t *src, uint16_t *dst, int srcWidth,
+                       int srcHeight) {
+  const int dstWidth = srcWidth / 2;
+  const int dstHeight = srcHeight / 2;
+  const float *decode = srgb_decode_half_table();
+
+  /* Exactly 2x2 per output pixel, so area weighting collapses to a plain
+   * average. */
+  forEachBand(dstHeight, chooseThreadCount(dstWidth, dstHeight),
+              [&](int y0, int y1) {
+                resize_f16_rows(src, dst, srcWidth, dstWidth, decode, y0, y1);
+              });
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNativeF16(
     JNIEnv *env, jobject thiz, jobject src_buffer, jobject dst_buffer,
@@ -156,48 +231,7 @@ Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNativeF16(
   if (!src || !dst)
     return;
 
-  /* Exactly 2x2 per output pixel, so area weighting collapses to a plain
-   * average. */
-  for (int y = 0; y < dstHeight; ++y) {
-    const uint16_t *row0 = src + (size_t)(y * 2) * srcWidth * 4;
-    const uint16_t *row1 = src + (size_t)(y * 2 + 1) * srcWidth * 4;
-    uint16_t *q = dst + (size_t)y * dstWidth * 4;
-
-    for (int x = 0; x < dstWidth; ++x) {
-      const uint16_t *p[4] = {
-          row0 + (size_t)(x * 2) * 4,
-          row0 + (size_t)(x * 2 + 1) * 4,
-          row1 + (size_t)(x * 2) * 4,
-          row1 + (size_t)(x * 2 + 1) * 4,
-      };
-
-      float sumR = 0.0f, sumG = 0.0f, sumB = 0.0f, sumA = 0.0f;
-
-      for (int i = 0; i < 4; ++i) {
-        float a = half_to_float(p[i][3]);
-        sumR += srgb_decode(half_to_float(p[i][0])) * a;
-        sumG += srgb_decode(half_to_float(p[i][1])) * a;
-        sumB += srgb_decode(half_to_float(p[i][2])) * a;
-        sumA += a;
-      }
-
-      float outR = 0.0f, outG = 0.0f, outB = 0.0f;
-      float outA = sumA * 0.25f;
-
-      if (sumA > 0.00001f) {
-        float inv = 1.0f / sumA;
-        outR = sumR * inv;
-        outG = sumG * inv;
-        outB = sumB * inv;
-      }
-
-      q[0] = float_to_half(srgb_encode(outR));
-      q[1] = float_to_half(srgb_encode(outG));
-      q[2] = float_to_half(srgb_encode(outB));
-      q[3] = float_to_half(outA);
-      q += 4;
-    }
-  }
+  resize_f16(src, dst, srcWidth, srcHeight);
 }
 
 /* -------------------------------------------------------------- tone map */

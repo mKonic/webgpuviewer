@@ -13,6 +13,8 @@
 #include <thread>
 #include <vector>
 
+#include "bands.h"
+
 namespace {
 
 constexpr int kChannels = 4;
@@ -146,19 +148,6 @@ void scanBand(const uint8_t *pixels, int width, int y0, int y1,
         bb.maxY = y;
     }
   }
-}
-
-int chooseThreadCount(int width, int height) {
-  // Below roughly a quarter-megapixel the scan is short enough that spawning
-  // threads costs more than it saves.
-  if (static_cast<int64_t>(width) * height < 256 * 1024) {
-    return 1;
-  }
-  unsigned hardware = std::thread::hardware_concurrency();
-  int count = static_cast<int>(std::min(hardware ? hardware : 1u, 8u));
-  // Keep bands big enough to be worth a thread.
-  count = std::min(count, height / 64);
-  return std::max(1, count);
 }
 
 // ---------------------------------------------------------------------------

@@ -20,34 +20,43 @@ internal object NormalMotionDurationScale : MotionDurationScale {
 suspend fun AwaitPointerEventScope.waitForCleanUp(
     pointerId: PointerId, timeout: Long, touchSlop: Float
 ): PointerEvent? = try {
-    withTimeout(timeout) {
-        var acc = Offset.Zero
-
-        while (true) {
-            val event = awaitPointerEvent()
-
-            if (event.changes.any { it.isConsumed }) {
-                return@withTimeout null
-            }
-
-            val change = event.changes.firstOrNull { it.id == pointerId } ?: return@withTimeout null
-
-            if (event.changes.any { it.id != pointerId && it.pressed }) {
-                return@withTimeout null
-            }
-
-            acc += event.calculatePan()
-            if (acc.getDistance() > touchSlop) {
-                return@withTimeout null
-            }
-            if (change.changedToUp()) {
-                return@withTimeout event
-            }
-        }
-    }
+    withTimeout(timeout) { waitForRelease(pointerId, touchSlop) }
 } catch (e: PointerEventTimeoutCancellationException) {
     null
 } as PointerEvent?
+
+/**
+ * The event that lifts [pointerId] within [touchSlop] of where it landed, however long that takes -
+ * a press held in place. Null once it strays further, another finger lands, or something else
+ * consumes the gesture: it is no longer a press by then, but whatever it turned into.
+ */
+suspend fun AwaitPointerEventScope.waitForRelease(
+    pointerId: PointerId, touchSlop: Float
+): PointerEvent? {
+    var acc = Offset.Zero
+
+    while (true) {
+        val event = awaitPointerEvent()
+
+        if (event.changes.any { it.isConsumed }) {
+            return null
+        }
+
+        val change = event.changes.firstOrNull { it.id == pointerId } ?: return null
+
+        if (event.changes.any { it.id != pointerId && it.pressed }) {
+            return null
+        }
+
+        acc += event.calculatePan()
+        if (acc.getDistance() > touchSlop) {
+            return null
+        }
+        if (change.changedToUp()) {
+            return event
+        }
+    }
+}
 
 suspend fun AwaitPointerEventScope.waitForDown(timeout: Long) = try {
     withTimeout(timeout) {

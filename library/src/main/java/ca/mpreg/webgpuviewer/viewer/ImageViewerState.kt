@@ -198,6 +198,25 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
     var onTap: ((Offset) -> Unit)? = null
     var onLongTap: ((Offset) -> Unit)? = null
 
+    /**
+     * Asked the moment a finger lands, with where as fractions of the surface, before the touch can
+     * become a tap, a long press or a drag. True claims it for a control the host drew there - a
+     * button on a [ImagePage.Render] page - so that control can show it is pressed straight away.
+     *
+     * A claimed touch that lifts in place reports [onPressEnd] as a click and nothing else: no
+     * [onTap], and no double tap waited out first, so the control answers on release the way a
+     * platform button does. One that slides past the touch slop or gains a second finger reports
+     * [onPressEnd] as cancelled and then carries on as the drag or pinch it became, so a page can
+     * still be turned or scrolled from on top of a button.
+     *
+     * Not asked while a page turn is in flight or content is still moving: that touch only stops
+     * the motion.
+     */
+    var onPress: ((Offset) -> Boolean)? = null
+
+    /** How a touch [onPress] claimed ended, where the finger was then, and whether it was a click. */
+    var onPressEnd: ((position: Offset, clicked: Boolean) -> Unit)? = null
+
     /** Override for the "from" page during far navigation animation */
     var transitionFromPage: ImagePage? = null
 
@@ -219,7 +238,12 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
     @Volatile
     protected var onScreenPages: List<ImagePage> = emptyList()
 
-    internal fun isOnScreen(page: ImagePage): Boolean = onScreenPages.any { it.covers(page) }
+    /**
+     * Whether [page] - or a spread holding it - was drawn by the last frame. A host hit testing
+     * something it drew on a page checks this first: a page kept for later still remembers where
+     * it last drew.
+     */
+    fun isOnScreen(page: ImagePage): Boolean = onScreenPages.any { it.covers(page) }
 
     @Synchronized
     fun init(scope: CoroutineScope, surface: Surface, width: Int, height: Int) {

@@ -35,6 +35,7 @@ import ca.mpreg.webgpuviewer.RequestMaxRefreshRate
 import ca.mpreg.webgpuviewer.orZero
 import ca.mpreg.webgpuviewer.waitForCleanUp
 import ca.mpreg.webgpuviewer.waitForDown
+import ca.mpreg.webgpuviewer.waitForRelease
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -108,12 +109,29 @@ fun ImageViewer(
                     page.isFlinging = false
                 }
 
+                // A control the host drew claims the touch before it can become anything else -
+                // see ImageViewerState.onPress. It comes back here if it turns into a drag.
+                var pressHandedBack = false
+                if (!stoppedMotion && !wasScrolling && state.onPress?.invoke(
+                        Offset(firstDown.position.x / state.width, firstDown.position.y / state.height)
+                    ) == true
+                ) {
+                    val release = waitForRelease(firstDown.id, touchSlop)
+                    val at = release?.changes?.firstOrNull { it.id == firstDown.id }?.position
+                        ?: firstDown.position
+                    state.onPressEnd?.invoke(
+                        Offset(at.x / state.width, at.y / state.height), release != null
+                    )
+                    if (release != null) return@awaitEachGesture
+                    pressHandedBack = true
+                }
+
                 var longPressed = false
 
                 val edgeThreshold = 50f
                 val nearEdge =
                     firstDown.position.x < edgeThreshold || firstDown.position.x > state.width - edgeThreshold
-                val longPressJob = if (!nearEdge && !stoppedMotion) {
+                val longPressJob = if (!nearEdge && !stoppedMotion && !pressHandedBack) {
                     scope.launch {
                         delay(viewConfiguration.longPressTimeoutMillis.milliseconds)
                         longPressed = true
@@ -126,7 +144,7 @@ fun ImageViewer(
                     }
                 } else null
 
-                if (waitForCleanUp(firstDown.id, doubleTapTimeout, touchSlop) != null) {
+                if (!pressHandedBack && waitForCleanUp(firstDown.id, doubleTapTimeout, touchSlop) != null) {
                     longPressJob?.cancel()
                     // A stop settles below and fires no tap, but still waits out the double
                     // tap window: it can be the first of a pair.

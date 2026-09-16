@@ -31,6 +31,7 @@ import ca.mpreg.webgpuviewer.NormalMotionDurationScale
 import ca.mpreg.webgpuviewer.RequestMaxRefreshRate
 import ca.mpreg.webgpuviewer.waitForCleanUp
 import ca.mpreg.webgpuviewer.waitForDown
+import ca.mpreg.webgpuviewer.waitForRelease
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -148,8 +149,25 @@ fun ImageViewerContinuous(
                     state.invalidate()
                 }
 
+                // A control the host drew claims the touch before it can become anything else -
+                // see ImageViewerState.onPress. It comes back here if it turns into a drag.
+                var pressHandedBack = false
+                if (!stoppedMotion && state.onPress?.invoke(
+                        Offset(firstDown.position.x / state.width, firstDown.position.y / state.height)
+                    ) == true
+                ) {
+                    val release = waitForRelease(firstDown.id, touchSlop)
+                    val at = release?.changes?.firstOrNull { it.id == firstDown.id }?.position
+                        ?: firstDown.position
+                    state.onPressEnd?.invoke(
+                        Offset(at.x / state.width, at.y / state.height), release != null
+                    )
+                    if (release != null) return@awaitEachGesture
+                    pressHandedBack = true
+                }
+
                 var longPressed = false
-                val longPressJob = if (stoppedMotion) null else scope.launch {
+                val longPressJob = if (stoppedMotion || pressHandedBack) null else scope.launch {
                     delay(viewConfiguration.longPressTimeoutMillis.milliseconds)
                     longPressed = true
                     state.onLongTap?.invoke(
@@ -160,7 +178,7 @@ fun ImageViewerContinuous(
                     )
                 }
 
-                if (waitForCleanUp(firstDown.id, doubleTapTimeout, touchSlop) != null) {
+                if (!pressHandedBack && waitForCleanUp(firstDown.id, doubleTapTimeout, touchSlop) != null) {
                     longPressJob?.cancel()
                     // A touch that only stopped motion can still be the first of a pair.
                     val secondDown = waitForDown(doubleTapTimeout)

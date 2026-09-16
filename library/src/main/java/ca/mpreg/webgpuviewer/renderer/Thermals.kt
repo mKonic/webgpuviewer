@@ -5,7 +5,7 @@ import android.os.Build
 import android.os.PowerManager
 import android.util.Log
 import android.view.View
-import java.lang.ref.WeakReference
+import androidx.annotation.RequiresApi
 
 /**
  * How hard the tile worker may push a device that is heating up.
@@ -38,7 +38,6 @@ object Thermals {
     private const val PAUSE_SEVERE_MS = 24L
     private const val PAUSE_CRITICAL_MS = 60L
 
-    private var host: WeakReference<View>? = null
     private var manager: PowerManager? = null
 
     @Volatile
@@ -55,11 +54,7 @@ object Thermals {
     fun attachHost(view: View?) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
         detachListener()
-        if (view == null) {
-            host = null
-            return
-        }
-        host = WeakReference(view)
+        if (view == null) return
         val pm = view.context.applicationContext
             .getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
         manager = pm
@@ -73,6 +68,7 @@ object Thermals {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.Q)
     private fun detachListener() {
         val pm = manager ?: return
         try {

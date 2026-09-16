@@ -185,7 +185,7 @@ class WebGpuRenderer {
                                     "WebGpuRenderer",
                                     "WebGPU device lost reason=$reason: $message device=$lost"
                                 )
-                                if (first) onDeviceLost?.invoke()
+                                if (first) onDeviceLost?.runCatching { invoke() }
                             },
                             deviceLostCallbackExecutor = Executor(Runnable::run),
                             uncapturedErrorCallback = UncapturedErrorCallback { _, type, message ->

@@ -1457,6 +1457,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                     st.tiles.remove(tkey)
                     st.instancesDirty = true
                     st.pending.add(tkey)
+                    // Gone from this frame's draw too, so the live page has to fill it until the
+                    // replacement lands.
+                    covered = false
                 }
             } else {
                 if (st.stable) st.pending.add(tkey)

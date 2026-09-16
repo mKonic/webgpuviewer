@@ -23,12 +23,16 @@ import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
 import androidx.webgpu.TextureFormat
 import ca.mpreg.webgpuviewer.closeTo
+import ca.mpreg.webgpuviewer.draw.BitmapTexture
 import ca.mpreg.webgpuviewer.draw.Draw
 import ca.mpreg.webgpuviewer.draw.Font
 import ca.mpreg.webgpuviewer.draw.TextAlign
+import ca.mpreg.webgpuviewer.draw.arc
+import ca.mpreg.webgpuviewer.draw.bitmap
 import ca.mpreg.webgpuviewer.draw.circle
 import ca.mpreg.webgpuviewer.draw.clear
 import ca.mpreg.webgpuviewer.draw.rect
+import ca.mpreg.webgpuviewer.draw.roundRect
 import ca.mpreg.webgpuviewer.draw.text
 import ca.mpreg.webgpuviewer.orZero
 import ca.mpreg.webgpuviewer.renderer.Image
@@ -106,7 +110,7 @@ open class ImagePage {
         override fun drawLive(
             encoder: GPUCommandEncoder, dst: GPUTexture, tiles: TileRenderer
         ): Boolean {
-            renderWith(encoder, x, y, scale, dst)
+            openPassAndRender(encoder, x, y, scale, dst, clear = true, live = true)
             return false
         }
 
@@ -137,8 +141,20 @@ open class ImagePage {
         /** Format of [pass]'s colour attachment - see [FormatKeyed]. */
         private var passFormat: Int = TextureFormat.RGBA8Unorm
 
-        /** Draws this page's content. Use [rect]/[circle]/[text] to draw into the open pass. */
+        /**
+         * Draws this page's content. Use [rect]/[circle]/[text]/[bitmap]/[arc]/[roundRect] to draw
+         * into the open pass.
+         */
         open fun render(dst: GPUTexture, x: Float, y: Float, scale: Float) {}
+
+        /**
+         * True while [render] draws the page where it is on screen, false while it seeds a
+         * transition's cache slot - where it is drawn as though it were at rest, not where it is.
+         * Anything a page keeps about where it drew, such as a button to hit test against
+         * [ImageViewerState.onPress], belongs to a live draw only.
+         */
+        protected var drawingLive: Boolean = false
+            private set
 
         @Volatile
         private var _renderVersion: Int = 0
@@ -188,6 +204,49 @@ open class ImagePage {
         protected fun circle(cx: Float, cy: Float, radius: Float, color: Int) =
             Draw.circle(pass, passFormat, cx, cy, radius, color)
 
+        /** [Draw.bitmap] into the open pass: [texture] over `[0, 1]` coordinates, as [rect]'s. */
+        protected fun bitmap(
+            texture: BitmapTexture,
+            x1: Float,
+            y1: Float,
+            x2: Float,
+            y2: Float,
+            alpha: Float = 1f,
+        ) = Draw.bitmap(pass, passFormat, texture, x1, y1, x2, y2, alpha)
+
+        /** [Draw.arc] into the open pass, in [dst]'s pixels. */
+        protected fun arc(
+            dst: GPUTexture,
+            cx: Float,
+            cy: Float,
+            radius: Float,
+            strokeWidth: Float,
+            startDegrees: Float,
+            sweepDegrees: Float,
+            color: Int,
+        ) = Draw.arc(
+            pass, passFormat, dst.width, dst.height,
+            cx, cy, radius, strokeWidth, startDegrees, sweepDegrees, color
+        )
+
+        /** [Draw.roundRect] into the open pass, in [dst]'s pixels. */
+        protected fun roundRect(
+            dst: GPUTexture,
+            left: Float,
+            top: Float,
+            right: Float,
+            bottom: Float,
+            cornerRadius: Float,
+            color: Int,
+            rippleX: Float = 0f,
+            rippleY: Float = 0f,
+            rippleRadius: Float = 0f,
+            rippleColor: Int = 0,
+        ) = Draw.roundRect(
+            pass, passFormat, dst.width, dst.height, left, top, right, bottom,
+            cornerRadius, color, rippleX, rippleY, rippleRadius, rippleColor
+        )
+
         protected fun text(
             dst: GPUTexture,
             font: Font,
@@ -225,7 +284,7 @@ open class ImagePage {
             // that doesn't override this at all. [dst] is this call's own - a rotated screen
             // buffer or a Transition's per-page cache slot - so nothing else on screen depends on
             // whatever was already there.
-            openPassAndRender(encoder, x, y, scale, dst, clear = true)
+            openPassAndRender(encoder, x, y, scale, dst, clear = true, live = false)
         }
 
         /**
@@ -239,9 +298,15 @@ open class ImagePage {
          * - [ImageViewerContinuousState] clears once up front to guard against that).
          */
         internal fun renderLoaded(
-            encoder: GPUCommandEncoder, x: Float, y: Float, scale: Float, dst: GPUTexture
+            encoder: GPUCommandEncoder,
+            x: Float,
+            y: Float,
+            scale: Float,
+            dst: GPUTexture,
+            /** False when the shared texture is a transition's cache slot - see [drawingLive]. */
+            live: Boolean = true,
         ) {
-            openPassAndRender(encoder, x, y, scale, dst, clear = false)
+            openPassAndRender(encoder, x, y, scale, dst, clear = false, live = live)
         }
 
         private fun argbToGPUColor(color: Int): GPUColor {
@@ -262,7 +327,8 @@ open class ImagePage {
             y: Float,
             scale: Float,
             dst: GPUTexture,
-            clear: Boolean
+            clear: Boolean,
+            live: Boolean,
         ) {
             val clearValue =
                 backgroundColor?.let { argbToGPUColor(it) } ?: GPUColor(0.0, 0.0, 0.0, 0.0)
@@ -282,6 +348,7 @@ open class ImagePage {
             )
             pass = openedPass
             passFormat = dst.format
+            drawingLive = live
             try {
                 // clear=true already painted the whole dst this colour via clearValue above - a
                 // page-scoped fillPage on top would be redundant. clear=false (the shared-texture
@@ -291,6 +358,7 @@ open class ImagePage {
                 }
                 render(dst, x, y, scale)
             } finally {
+                drawingLive = false
                 openedPass.endAndRelease(targetView)
             }
         }
@@ -946,7 +1014,7 @@ open class ImagePage {
             encoder: GPUCommandEncoder, dst: GPUTexture, tiles: TileRenderer
         ): Boolean {
             val covered = super.drawLive(encoder, dst, tiles)
-            drawRenderSides(encoder, dst)
+            drawRenderSides(encoder, dst, live = true)
             return covered
         }
 
@@ -954,7 +1022,7 @@ open class ImagePage {
             encoder: GPUCommandEncoder, tex: GPUTexture, tiles: TileRenderer
         ) {
             super.renderCacheSeed(encoder, tex, tiles)
-            drawRenderSides(encoder, tex)
+            drawRenderSides(encoder, tex, live = false)
         }
 
         /** [frameVersion] is the sides' sum, so this page's own has nothing to bump. */
@@ -1001,7 +1069,7 @@ open class ImagePage {
          * places an image side, so [Render.render]/[Render.fillPage] land in the right half
          * instead of treating [dst] as a page of their own.
          */
-        private fun drawRenderSides(encoder: GPUCommandEncoder, dst: GPUTexture) {
+        private fun drawRenderSides(encoder: GPUCommandEncoder, dst: GPUTexture, live: Boolean) {
             // As forEachPlacedImage: the page can have been evicted since the snapshot was taken.
             if (destroyed) return
             forEachSide { side, offsetX, sideScale ->
@@ -1012,7 +1080,8 @@ open class ImagePage {
                         (x + offsetX / dst.width) / sideScale,
                         y / sideScale,
                         scale * sideScale,
-                        dst
+                        dst,
+                        live,
                     )
                 }
             }

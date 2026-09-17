@@ -5,6 +5,7 @@ import android.os.Build
 import android.os.PowerManager
 import android.util.Log
 import android.view.View
+import androidx.annotation.RequiresApi
 import java.lang.ref.WeakReference
 
 /**
@@ -73,6 +74,7 @@ object Thermals {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.Q)
     private fun detachListener() {
         val pm = manager ?: return
         try {

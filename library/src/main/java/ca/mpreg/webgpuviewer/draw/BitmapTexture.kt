@@ -28,6 +28,7 @@ import androidx.webgpu.GPUVertexState
 import androidx.webgpu.PrimitiveTopology
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
+import ca.mpreg.webgpuviewer.renderer.groupLayout
 import ca.mpreg.webgpuviewer.renderer.FormatKeyed
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.destroyAndRelease
@@ -265,7 +266,7 @@ fun Draw.bitmap(
     pass.setTransientBindGroup(
         0, device.createBindGroup(
             GPUBindGroupDescriptor(
-                layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
+                layout = pipeline.groupLayout(), entries = arrayOf(
                     GPUBindGroupEntry(0, buffer = uniformBuffer),
                     GPUBindGroupEntry(1, textureView = view),
                     GPUBindGroupEntry(2, sampler = sampler),

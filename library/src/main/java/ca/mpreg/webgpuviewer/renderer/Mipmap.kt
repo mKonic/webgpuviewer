@@ -292,7 +292,7 @@ class Mipmap(
         val groups = tileBindGroups.getOrPut(pipeline) { arrayOfNulls(textures.size) }
         return groups[index] ?: device.createBindGroup(
             GPUBindGroupDescriptor(
-                layout = pipeline.getBindGroupLayout(0), entries = arrayOf(
+                layout = pipeline.groupLayout(), entries = arrayOf(
                     GPUBindGroupEntry(0, buffer = tileUniformFor(index)),
                     GPUBindGroupEntry(1, textureView = textureViews[index]),
                 )

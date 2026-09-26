@@ -374,8 +374,10 @@ class Image private constructor(
         val smaller =
             if (levels.size > 1) smallerLevels(pixels, width, height, isHdr) else emptyList()
         return WebGpuRenderer.onDispatcher { _ ->
-            base.update(pixels, rect) &&
+            (
+                base.update(pixels, rect) &&
                     levels.drop(1).zip(smaller).all { (level, data) -> level.update(data.pixels) }
+                ).also { contentVersion++ }
         }
     }
 
@@ -395,6 +397,7 @@ class Image private constructor(
             WebGpuRenderer.withContext { _ ->
                 check(mipmaps.size == 1 && mipmaps[0] === base) { "Image was cleaned up" }
                 mipmaps.addAll(extra)
+                contentVersion++
             }
         } catch (e: Throwable) {
             if (extra.isNotEmpty() && mipmaps.none { it in extra }) {
@@ -417,6 +420,7 @@ class Image private constructor(
         WebGpuRenderer.withContext { _ ->
             trim = newTrim
             background?.let { this@Image.backgroundColor = it }
+            contentVersion++
         }
     }
 
@@ -428,6 +432,14 @@ class Image private constructor(
         get() = _buffer ?: error("Image buffer accessed after cleanup")
 
     val mipmaps: MutableList<Mipmap> = mutableListOf()
+
+    /**
+     * Bumped on the render thread by [update], [createMipMaps] and [measure], so a cache of what
+     * this image looked like (the tile atlas) can tell it went stale.
+     */
+    @Volatile
+    var contentVersion = 0
+        private set
 
     /** Guards the [Hdr] count against a second [cleanup] on the same image. */
     @Volatile

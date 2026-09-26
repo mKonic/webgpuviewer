@@ -692,7 +692,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                 size = FRAME_UNIFORM_BYTES, usage = BufferUsage.Uniform or BufferUsage.CopyDst
             )
         ), preferredTileSize
-    )
+    ).also { it.contentVersion = contentVersionOf(page) }
 
     /**
      * Release the grid longest without a draw, to get whole slabs back. Never one on screen: its
@@ -704,6 +704,13 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         } ?: return
         releaseTiles(victim)
         victim.pending.clear()
+    }
+
+    /** Changes whenever any image on [page] is rewritten, so its grid can be re-cut. */
+    private fun contentVersionOf(page: ImagePage.ImageSingle): Int {
+        var v = 0
+        page.forEachImage { image, _, _ -> v = 31 * v + image.contentVersion }
+        return v
     }
 
     /** Hand [st]'s tiles back to the atlas - it keeps none of its own state about them. */
@@ -769,6 +776,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
          * agree with where it sits.
          */
         var centerYOffset = 0f
+
+        /** [contentVersionOf] the page when these tiles were cut. */
+        var contentVersion = 0
 
         // The strictly visible tile range as of the last draw, in tile coordinates. The worker
         // prioritises against it at pull time, so a pan mid-fill redirects generation without
@@ -1220,12 +1230,14 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
         val a = pagedAnchor(page, dst, 0f, 0f, 1f)
         val st = pages.getOrPut(page) { newGrid(page, a.pageScale) }
+        val version = contentVersionOf(page)
 
-        if (st.scale != a.pageScale || st.tileSize != preferredTileSize) {
+        if (st.scale != a.pageScale || st.tileSize != preferredTileSize || st.contentVersion != version) {
             releaseTiles(st)
             st.pending.clear()
             st.scale = a.pageScale
             st.tileSize = preferredTileSize
+            st.contentVersion = version
             st.stable = false
             invalidate()
         } else {
@@ -1392,16 +1404,18 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             }
         }
 
+        val version = contentVersionOf(page)
         if (st.scale != pageScale || st.centerYOffset != centerYOffset ||
-            st.tileSize != preferredTileSize
+            st.tileSize != preferredTileSize || st.contentVersion != version
         ) {
             // A changed centerYOffset at fixed scale means a placeholder corrected its guessed
             // height - invalidate the same way a scale change does. A changed preferred size
-            // rides the same path: this is the one moment a grid can be re-cut for free.
+            // or rewritten image rides the same path: this is the one moment a grid can be re-cut.
             releaseTiles(st)
             st.pending.clear()
             st.scale = pageScale
             st.tileSize = preferredTileSize
+            st.contentVersion = version
             st.stable = false
             invalidate()
         } else {

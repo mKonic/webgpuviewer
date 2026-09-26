@@ -60,9 +60,14 @@ class Mipmap(
          * [WebGpuRenderer.onDispatcher]) for the yields to be worth anything. The level is only
          * returned once every chunk has landed, so no caller can sample a half-filled texture.
          */
+        /**
+         * Only the first [validRows] rows of [pixels] are copied; below them the textures keep
+         * WebGPU's zero initialisation until an [update] fills them.
+         */
         suspend fun create(
             pixels: ByteBuffer, width: Int, height: Int, scale: Float, tilesize: Int,
-            format: Int = TextureFormat.RGBA8Unorm
+            format: Int = TextureFormat.RGBA8Unorm,
+            validRows: Int = height,
         ): Mipmap {
             val mipmap = Mipmap(
                 width = width,
@@ -74,7 +79,7 @@ class Mipmap(
                 format = format,
             )
             try {
-                mipmap.upload(pixels)
+                mipmap.upload(pixels, validRows)
             } catch (e: Throwable) {
                 // Yielding makes the upload cancellable, so a half-built level can now exist.
                 // Free whatever landed before rethrowing - the caller never sees this instance
@@ -87,7 +92,7 @@ class Mipmap(
     }
 
     /** Allocate the tile textures and copy [pixels] into them a chunk at a time. */
-    private suspend fun upload(pixels: ByteBuffer) {
+    private suspend fun upload(pixels: ByteBuffer, validRows: Int) {
         val rowsPerChunk = (UPLOAD_CHUNK_BYTES / (width * bytesPerPixel)).coerceAtLeast(1)
 
         for (r in 0 until tilesRows) {
@@ -111,9 +116,10 @@ class Mipmap(
                     )
                 }
 
+                val uploadHeight = (validRows - y).coerceIn(0, tileHeight)
                 var row = 0
-                while (row < tileHeight) {
-                    val rows = min(rowsPerChunk, tileHeight - row)
+                while (row < uploadHeight) {
+                    val rows = min(rowsPerChunk, uploadHeight - row)
 
                     traced("wgv:mipUpload") {
                         device.queue.writeTexture(

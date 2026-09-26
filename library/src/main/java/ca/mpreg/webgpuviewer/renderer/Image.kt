@@ -88,8 +88,22 @@ class Image private constructor(
             hdr: Boolean = false,
             hdrHeadroom: Float = 0f,
             gainmap: GainmapInput? = null,
+            /**
+             * Rows of [pixels] from the top that hold the image yet; the rest are left to
+             * [update]. Short of [height], nothing is measured or resized from them: pass a
+             * [backgroundColor] and no trim or mipmaps, then [measure] and [createMipMaps] once
+             * the image is whole.
+             */
+            validRows: Int = height,
         ): Image {
             require(width > 0 && height > 0) { "Image dimensions must be positive" }
+            require(validRows in 0..height) { "validRows must be within the image" }
+            require(
+                validRows == height || (
+                    !createMipMaps && trimColors == null && backgroundColor != null &&
+                        !hdr && gainmap == null
+                    )
+            ) { "a partial image takes a background colour and no trim, mipmaps or HDR" }
             require(trimColors == null || trimColors.all { it.size >= 3 }) {
                 "each trimColor must have at least 3 elements [r, g, b]"
             }
@@ -188,7 +202,7 @@ class Image private constructor(
             try {
                 return finishImage(
                     image, pixels, width, height, keepHdr, headroom, createMipMaps,
-                    trimColors, trimThreshold, backgroundColor,
+                    trimColors, trimThreshold, backgroundColor, validRows,
                 )
             } catch (e: Throwable) {
                 // A cancelled decode (e.g. the viewer closing mid-load) still leaves the buffer
@@ -209,6 +223,7 @@ class Image private constructor(
             trimColors: List<FloatArray>?,
             trimThreshold: Float,
             backgroundColor: Int?,
+            validRows: Int,
         ): Image {
             val tileFormat =
                 if (keepHdr) TextureFormat.RGBA16Float else TextureFormat.RGBA8Unorm
@@ -230,7 +245,7 @@ class Image private constructor(
             image.trim = trim
             background?.let { image.backgroundColor = it }
 
-            val levels = listOf(Level(pixels, width, height, 1f)) +
+            val levels = listOf(Level(pixels, width, height, 1f, validRows)) +
                     if (createMipMaps) smallerLevels(
                         pixels,
                         width,
@@ -312,8 +327,11 @@ class Image private constructor(
 
         private const val TILESIZE = 2048
 
-        private class Level(val pixels: ByteBuffer, val w: Int, val h: Int, val scale: Float) {
-            suspend fun upload(format: Int) = Mipmap.create(pixels, w, h, scale, TILESIZE, format)
+        private class Level(
+            val pixels: ByteBuffer, val w: Int, val h: Int, val scale: Float, val validRows: Int = h,
+        ) {
+            suspend fun upload(format: Int) =
+                Mipmap.create(pixels, w, h, scale, TILESIZE, format, validRows)
         }
 
         private suspend fun smallerLevels(

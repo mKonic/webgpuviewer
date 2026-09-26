@@ -396,8 +396,8 @@ class Image private constructor(
             }
             WebGpuRenderer.withContext { _ ->
                 check(mipmaps.size == 1 && mipmaps[0] === base) { "Image was cleaned up" }
+                // No contentVersion bump: tiles already cut from the full level are as good.
                 mipmaps.addAll(extra)
-                contentVersion++
             }
         } catch (e: Throwable) {
             if (extra.isNotEmpty() && mipmaps.none { it in extra }) {
@@ -434,7 +434,7 @@ class Image private constructor(
     val mipmaps: MutableList<Mipmap> = mutableListOf()
 
     /**
-     * Bumped on the render thread by [update], [createMipMaps] and [measure], so a cache of what
+     * Bumped on the render thread by [update] and [measure], so a cache of what
      * this image looked like (the tile atlas) can tell it went stale.
      */
     @Volatile

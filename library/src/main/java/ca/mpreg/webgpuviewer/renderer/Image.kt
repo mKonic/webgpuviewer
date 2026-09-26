@@ -425,7 +425,10 @@ class Image private constructor(
         }
     }
 
-    /** Sets [trim] and [backgroundColor] from [pixels] as [invoke] would. */
+    /**
+     * Sets [backgroundColor] from [pixels] as [invoke] would, and [trim] too when [trimColors]
+     * are given.
+     */
     suspend fun measure(
         pixels: ByteBuffer,
         trimColors: List<FloatArray>? = null,
@@ -436,7 +439,8 @@ class Image private constructor(
             measurePixels(pixels, width, height, isHdr, trimColors, trimThreshold, backgroundColor)
         }
         WebGpuRenderer.withContext { _ ->
-            trim = newTrim
+            // Only what was asked for: a host's own crop survives a background-only measure.
+            if (trimColors != null) trim = newTrim
             background?.let { this@Image.backgroundColor = it }
             contentVersion++
         }

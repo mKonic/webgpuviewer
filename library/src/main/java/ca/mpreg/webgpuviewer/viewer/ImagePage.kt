@@ -41,6 +41,7 @@ import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.endAndRelease
 import ca.mpreg.webgpuviewer.renderer.traced
+import java.nio.ByteBuffer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -495,6 +496,65 @@ open class ImagePage {
                     frameIndex = (frameIndex + 1) % (this@ImageSingle.frames?.size ?: 1)
                 }
             }
+        }
+
+        /**
+         * Plays [frameCount] frames that are decoded as they come due rather than held, for an
+         * animation too large to keep every frame on the GPU. The two [slots] take turns: the
+         * next frame is written into the one off screen while the other shows, so a frame never
+         * changes while it is drawn. Built by the caller from frames 0 and 1.
+         *
+         * [frame] returns frame i's pixels in the slots' texel format, or null to stop the
+         * animation where it is. It is only asked while the page is on screen; off screen the
+         * loop keeps time without decoding, and picks up at the frame then due.
+         *
+         * Returns the loop, which ends when the page is cleaned up (or [frame] gives up), so the
+         * caller knows when to release whatever [frame] reads from; null if already cleaned up.
+         */
+        fun startStreamedAnimation(
+            slots: List<Image>,
+            frameCount: Int,
+            duration: (Int) -> Int,
+            frame: suspend (Int) -> ByteBuffer?,
+        ): Job? {
+            require(slots.size == 2) { "a streamed animation takes two slots" }
+            require(frameCount >= 2) { "a streamed animation takes at least two frames" }
+            if (destroyed) return null
+
+            animationLoop?.cancel()
+            // As frames, so cleanup frees both slots and the page reads as animated.
+            this.frames = slots.map { it to 0 }
+            currentFrameImage = slots[0]
+
+            val loopScope = scope ?: cleanupScope
+            animationLoop = loopScope.launch {
+                var index = 0
+                var shown = 0
+                // The caller built the hidden slot from frame 1.
+                var nextReady = true
+                while (true) {
+                    val started = System.nanoTime()
+                    val next = (index + 1) % frameCount
+                    if (!nextReady && isOnScreen) {
+                        val pixels = frame(next) ?: break
+                        if (!slots[1 - shown].update(pixels)) break
+                        nextReady = true
+                    }
+                    val spentMs = (System.nanoTime() - started) / 1_000_000
+                    val waitMs = duration(index).coerceAtLeast(MIN_FRAME_MILLIS) - spentMs
+                    if (waitMs > 0) delay(waitMs.milliseconds)
+                    if (this@ImageSingle.frames == null) break
+
+                    index = next
+                    if (nextReady) {
+                        shown = 1 - shown
+                        currentFrameImage = slots[shown]
+                        nextReady = false
+                        invalidate()
+                    }
+                }
+            }
+            return animationLoop
         }
 
         override fun renderWith(

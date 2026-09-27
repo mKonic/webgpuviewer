@@ -239,7 +239,7 @@ Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNative(
     jint srcWidth, jint srcHeight) {
   if (!env || !src_buffer || !dst_buffer)
     return;
-  if (srcWidth <= 0 || srcHeight <= 0 || srcWidth > 16384 || srcHeight > 16384)
+  if (srcWidth <= 0 || srcHeight <= 0)
     return;
 
   uint32_t *src = (uint32_t *)env->GetDirectBufferAddress(src_buffer);

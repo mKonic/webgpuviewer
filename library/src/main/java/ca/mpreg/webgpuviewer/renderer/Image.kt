@@ -387,20 +387,25 @@ class Image private constructor(
      * rebuilt whole. Chunked and yielding, so frames keep drawing. False if cleaned up part way.
      */
     suspend fun update(pixels: ByteBuffer, rect: Rect? = null): Boolean {
+        requireFullImage(pixels)
         val levels = mipmaps.toList()
         val base = levels.firstOrNull() ?: return false
         val smaller =
             if (levels.size > 1) smallerLevels(pixels, width, height, isHdr) else emptyList()
         return WebGpuRenderer.onDispatcher { _ ->
-            (
+            try {
                 base.update(pixels, rect) &&
-                    levels.drop(1).zip(smaller).all { (level, data) -> level.update(data.pixels) }
-                ).also { contentVersion++ }
+                        levels.drop(1).zip(smaller)
+                            .all { (level, data) -> level.update(data.pixels) }
+            } finally {
+                contentVersion++
+            }
         }
     }
 
     /** Adds the smaller levels [invoke]'s createMipMaps makes, from [pixels] as in [update]. */
     suspend fun createMipMaps(pixels: ByteBuffer) {
+        requireFullImage(pixels)
         val base = mipmaps.firstOrNull() ?: error("Image has no textures")
         if (mipmaps.size > 1) return
         val levels = smallerLevels(pixels, width, height, isHdr)
@@ -422,6 +427,14 @@ class Image private constructor(
                 WebGpuRenderer.onDispatcher { _ -> extra.forEach { it.cleanup() } }
             }
             throw e
+        }
+    }
+
+    /** A short buffer would have writeTexture read past it, and the native resize silently skip. */
+    private fun requireFullImage(pixels: ByteBuffer) {
+        val need = width.toLong() * height * (if (isHdr) 8 else 4)
+        require(pixels.isDirect && pixels.capacity() >= need) {
+            "pixels hold ${pixels.capacity()} B, ${width}x$height needs $need"
         }
     }
 
@@ -456,8 +469,9 @@ class Image private constructor(
     val mipmaps: MutableList<Mipmap> = mutableListOf()
 
     /**
-     * Bumped on the render thread by [update] and [measure], so a cache of what
-     * this image looked like (the tile atlas) can tell it went stale.
+     * Bumped on the render thread by [update] and [measure], so a cache of what this image looked
+     * like (the tile atlas, a transition's cached copy via the page's frameVersion) can tell it
+     * went stale.
      */
     @Volatile
     var contentVersion = 0

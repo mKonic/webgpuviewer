@@ -112,6 +112,7 @@ fun ImageViewerContinuous(
                         }
                     } finally {
                         state.isScaleAnimating = false
+                        state.invalidate()
                     }
                 }
                 return true
@@ -222,6 +223,7 @@ fun ImageViewerContinuous(
                                     }
                                 } finally {
                                     state.isScaleAnimating = false
+                                    state.invalidate()
                                 }
                             }
                         } else {
@@ -248,6 +250,7 @@ fun ImageViewerContinuous(
                                     }
                                 } finally {
                                     state.isScaleAnimating = false
+                                    state.invalidate()
                                 }
                             }
                         }
@@ -303,7 +306,10 @@ fun ImageViewerContinuous(
                             willFlingZoom =
                                 abs(dragVelocity.y) > 200 && state.scale > state.minScale && state.scale < state.maxScale
                         } finally {
-                            if (!willFlingZoom) state.isScaleAnimating = false
+                            if (!willFlingZoom) {
+                                state.isScaleAnimating = false
+                                state.invalidate()
+                            }
                         }
 
                         val velocity = velocityTracker.calculateVelocity()
@@ -330,6 +336,7 @@ fun ImageViewerContinuous(
                                     }
                                 } finally {
                                     state.isScaleAnimating = false
+                                    state.invalidate()
                                 }
                             }
                         } else if (!snapScaleIntoBounds(px, py)) {
@@ -415,6 +422,7 @@ fun ImageViewerContinuous(
                     } finally {
                         state.isScaleAnimating = false
                         state.isPanning = false
+                        state.invalidate()
                     }
 
                     longPressJob?.cancel()

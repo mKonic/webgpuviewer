@@ -692,7 +692,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                 size = FRAME_UNIFORM_BYTES, usage = BufferUsage.Uniform or BufferUsage.CopyDst
             )
         ), preferredTileSize
-    ).also { it.contentVersion = contentVersionOf(page) }
+    )
 
     /**
      * Release the grid longest without a draw, to get whole slabs back. Never one on screen: its
@@ -700,17 +700,11 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      */
     private fun freeColdestGrid(keep: PageTiles) {
         val victim = pages.values.firstOrNull {
-            it !== keep && it.tiles.isNotEmpty() && !it.page.isOnScreen
+            it !== keep && it.tiles.isNotEmpty() && !it.page.isOnScreen &&
+                    it.tiles.values.none { t -> t.lastUsed >= frame - 1 }
         } ?: return
         releaseTiles(victim)
         victim.pending.clear()
-    }
-
-    /** Changes whenever any image on [page] is rewritten, so its grid can be re-cut. */
-    private fun contentVersionOf(page: ImagePage.ImageSingle): Int {
-        var v = 0
-        page.forEachImage { image, _, _ -> v = 31 * v + image.contentVersion }
-        return v
     }
 
     /** Hand [st]'s tiles back to the atlas - it keeps none of its own state about them. */
@@ -737,6 +731,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         /** Cut at this size until the grid is wiped, which is when it adopts a new preferred one. */
         var tileSize: Int,
     ) {
+        /** [ImagePage.ImageSingle.contentVersion] the tiles were cut from. */
+        var contentVersion = page.contentVersion
+
         val tiles = HashMap<Long, Tile>()
         val pending = HashSet<Long>()
 
@@ -776,9 +773,6 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
          * agree with where it sits.
          */
         var centerYOffset = 0f
-
-        /** [contentVersionOf] the page when these tiles were cut. */
-        var contentVersion = 0
 
         // The strictly visible tile range as of the last draw, in tile coordinates. The worker
         // prioritises against it at pull time, so a pan mid-fill redirects generation without
@@ -1196,6 +1190,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
         val st = pages[page] ?: return null
         val a = pagedAnchor(page, dst, 0f, 0f, 1f)
+        if (st.contentVersion != page.contentVersion || st.scale != a.pageScale ||
+            st.tileSize != preferredTileSize
+        ) return emptySet()
         val gp =
             gridPlacement(page, dst, a.anchorX, a.anchorY, 0f, a.pageScale, st.tileSize)
                 ?: return null
@@ -1230,9 +1227,11 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
         val a = pagedAnchor(page, dst, 0f, 0f, 1f)
         val st = pages.getOrPut(page) { newGrid(page, a.pageScale) }
-        val version = contentVersionOf(page)
+        val version = page.contentVersion
 
-        if (st.scale != a.pageScale || st.tileSize != preferredTileSize || st.contentVersion != version) {
+        if (st.scale != a.pageScale || st.tileSize != preferredTileSize ||
+            st.contentVersion != version
+        ) {
             releaseTiles(st)
             st.pending.clear()
             st.scale = a.pageScale
@@ -1404,7 +1403,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             }
         }
 
-        val version = contentVersionOf(page)
+        val version = page.contentVersion
         if (st.scale != pageScale || st.centerYOffset != centerYOffset ||
             st.tileSize != preferredTileSize || st.contentVersion != version
         ) {
@@ -1804,6 +1803,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     private fun generate(req: Request, measurementScope: CoroutineScope): Job? {
         val st = req.state
         if (st.destroyed || !st.stable) return null
+        if (st.contentVersion != st.page.contentVersion) return null
         return generateTileNow(st, req.tx, req.ty, measurementScope, req.onScreen)
     }
 

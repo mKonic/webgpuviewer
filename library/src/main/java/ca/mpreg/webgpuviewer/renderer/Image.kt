@@ -349,6 +349,7 @@ class Image private constructor(
                 scale /= 2
                 val newWidth = floor(width * scale).toInt()
                 val newHeight = floor(height * scale).toInt()
+                if (newWidth < 1 || newHeight < 1) break
                 Log.d("Renderer", "Create mipmap using CPU ${scale} ${newWidth} ${newHeight}")
 
                 currentPixels = withContext(Dispatchers.Default) {

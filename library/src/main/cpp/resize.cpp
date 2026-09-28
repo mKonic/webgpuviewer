@@ -214,12 +214,11 @@ void resizeRows(const uint32_t *src, uint32_t *dst, int srcWidth,
   }
 }
 
-/* [src] is [srcWidth] x [srcHeight]; [dst] holds half of each, rounded down. */
+/* [src] is [srcWidth] x [srcHeight], [dst] is [dstWidth] x [dstHeight]; a
+ * larger destination repeats pixels. */
 void resizeLinearArea(const uint32_t *src, uint32_t *dst, int srcWidth,
-                      int srcHeight) {
+                      int srcHeight, int dstWidth, int dstHeight) {
   initLUTs();
-  const int dstWidth = srcWidth / 2;
-  const int dstHeight = srcHeight / 2;
   const Axis xs = buildAxis(srcWidth, dstWidth);
   const Axis ys = buildAxis(srcHeight, dstHeight);
 
@@ -229,14 +228,16 @@ void resizeLinearArea(const uint32_t *src, uint32_t *dst, int srcWidth,
               });
 }
 
-} // namespace
+/* [dst] holds half of each dimension, rounded down. */
+void resizeLinearArea(const uint32_t *src, uint32_t *dst, int srcWidth,
+                      int srcHeight) {
+  resizeLinearArea(src, dst, srcWidth, srcHeight, srcWidth / 2, srcHeight / 2);
+}
 
-/* A mismatched size/buffer here indexes past its end rather than throwing, so
- * both are checked. */
-extern "C" JNIEXPORT void JNICALL
-Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNative(
-    JNIEnv *env, jobject thiz, jobject src_buffer, jobject dst_buffer,
-    jint srcWidth, jint srcHeight) {
+/* A mismatched size/buffer indexes past its end rather than throwing, so both
+ * are checked. */
+void resizeArea(JNIEnv *env, jobject src_buffer, jobject dst_buffer,
+                jint srcWidth, jint srcHeight, jint dstWidth, jint dstHeight) {
   if (!env || !src_buffer || !dst_buffer)
     return;
   if (srcWidth <= 0 || srcHeight <= 0)
@@ -258,8 +259,6 @@ Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNative(
   if (srcCapacity < 0 || srcCapacity < srcNeeded)
     return;
 
-  int dstWidth = srcWidth / 2;
-  int dstHeight = srcHeight / 2;
   if (dstWidth <= 0 || dstHeight <= 0)
     return;
 
@@ -269,5 +268,23 @@ Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNative(
   if (dstCapacity < 0 || dstCapacity < dstNeeded)
     return;
 
-  resizeLinearArea(src, dst, srcWidth, srcHeight);
+  resizeLinearArea(src, dst, srcWidth, srcHeight, dstWidth, dstHeight);
+}
+
+} // namespace
+
+extern "C" JNIEXPORT void JNICALL
+Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNative(
+    JNIEnv *env, jobject thiz, jobject src_buffer, jobject dst_buffer,
+    jint srcWidth, jint srcHeight) {
+  resizeArea(env, src_buffer, dst_buffer, srcWidth, srcHeight, srcWidth / 2,
+             srcHeight / 2);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaToNative(
+    JNIEnv *env, jobject thiz, jobject src_buffer, jobject dst_buffer,
+    jint srcWidth, jint srcHeight, jint dstWidth, jint dstHeight) {
+  resizeArea(env, src_buffer, dst_buffer, srcWidth, srcHeight, dstWidth,
+             dstHeight);
 }

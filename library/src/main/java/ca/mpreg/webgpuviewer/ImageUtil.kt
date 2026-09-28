@@ -28,6 +28,16 @@ object ImageUtil {
         height: Int
     )
 
+    /** As [resizeLinearAreaNative], to [dstWidth] x [dstHeight] at 4 B/px. */
+    external fun resizeLinearAreaToNative(
+        pixels: ByteBuffer,
+        dstPixels: ByteBuffer,
+        width: Int,
+        height: Int,
+        dstWidth: Int,
+        dstHeight: Int
+    )
+
     /**
      * [resizeLinearAreaNative] over extended-sRGB RGBA half-float, for an HDR image's mipmaps.
      *
@@ -39,6 +49,16 @@ object ImageUtil {
         dstPixels: ByteBuffer,
         width: Int,
         height: Int
+    )
+
+    /** As [resizeLinearAreaNativeF16], to [dstWidth] x [dstHeight] at 8 B/px. */
+    external fun resizeLinearAreaToNativeF16(
+        pixels: ByteBuffer,
+        dstPixels: ByteBuffer,
+        width: Int,
+        height: Int,
+        dstWidth: Int,
+        dstHeight: Int
     )
 
     /**
@@ -149,11 +169,29 @@ object ImageUtil {
         return output
     }
 
+    /** [resize] to [dstWidth] x [dstHeight] rather than half. */
+    fun resize(
+        source: ByteBuffer, width: Int, height: Int, dstWidth: Int, dstHeight: Int
+    ): ByteBuffer {
+        val output = directBuffer(dstWidth, dstHeight, 4)
+        resizeLinearAreaToNative(source, output, width, height, dstWidth, dstHeight)
+        return output
+    }
+
     /** [resize] for extended-sRGB half-float pixels, which are twice as wide. */
     fun resizeF16(source: ByteBuffer, width: Int, height: Int): ByteBuffer {
         // Half by half at 8 B/px, so two bytes per source pixel.
         val output = directBuffer(width, height, 2)
         resizeLinearAreaNativeF16(source, output, width, height)
+        return output
+    }
+
+    /** [resizeF16] to [dstWidth] x [dstHeight] rather than half. */
+    fun resizeF16(
+        source: ByteBuffer, width: Int, height: Int, dstWidth: Int, dstHeight: Int
+    ): ByteBuffer {
+        val output = directBuffer(dstWidth, dstHeight, 8)
+        resizeLinearAreaToNativeF16(source, output, width, height, dstWidth, dstHeight)
         return output
     }
 

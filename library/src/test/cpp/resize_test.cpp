@@ -211,4 +211,44 @@ TEST(resizeKeepsAnOpaqueColourExactly) {
   CHECK_EQ(wrong, 0);
 }
 
+TEST(resizeToAnySizeKeepsAnOpaqueColour) {
+  const int w = 37, h = 23;
+  std::vector<uint32_t> src(static_cast<size_t>(w) * h, 0xFF336699u);
+  const int sizes[][2] = {{10, 7}, {36, 22}, {1, 1}, {74, 46}, {50, 9}};
+  int wrong = 0;
+  for (const auto &size : sizes) {
+    std::vector<uint32_t> dst(static_cast<size_t>(size[0]) * size[1]);
+    resizeLinearArea(src.data(), dst.data(), w, h, size[0], size[1]);
+    for (uint32_t p : dst) {
+      if (p != 0xFF336699u) ++wrong;
+    }
+  }
+  CHECK_EQ(wrong, 0);
+}
+
+TEST(resizeToHalfIsTheHalfResize) {
+  const int w = 33, h = 17;
+  std::vector<uint32_t> src(static_cast<size_t>(w) * h);
+  std::mt19937 rng(7);
+  for (uint32_t &p : src) p = rng();
+  std::vector<uint32_t> half(static_cast<size_t>(w / 2) * (h / 2));
+  std::vector<uint32_t> to(half.size());
+  resizeLinearArea(src.data(), half.data(), w, h);
+  resizeLinearArea(src.data(), to.data(), w, h, w / 2, h / 2);
+  CHECK(half == to);
+}
+
+TEST(resizeToALargerSizeRepeatsPixels) {
+  const uint32_t src[] = {0xFF000000u, 0xFFFFFFFFu, 0xFFFF0000u, 0xFF0000FFu};
+  std::vector<uint32_t> dst(4 * 4);
+  resizeLinearArea(src, dst.data(), 2, 2, 4, 4);
+  int wrong = 0;
+  for (int y = 0; y < 4; ++y) {
+    for (int x = 0; x < 4; ++x) {
+      if (dst[y * 4 + x] != src[(y / 2) * 2 + x / 2]) ++wrong;
+    }
+  }
+  CHECK_EQ(wrong, 0);
+}
+
 int main() { return check::main(); }

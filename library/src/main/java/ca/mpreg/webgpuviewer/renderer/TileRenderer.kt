@@ -1,5 +1,6 @@
 package ca.mpreg.webgpuviewer.renderer
 
+import android.graphics.Rect
 import android.util.Log
 import androidx.webgpu.BlendFactor
 import androidx.webgpu.BlendOperation
@@ -1168,17 +1169,25 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         docTop: Float,
         pageHeight: Float,
         viewerOffsetX: Float,
-        scale: Float
+        scale: Float,
+        crop: Rect? = null,
     ): ContinuousAnchor? {
         if (page.width <= 0) return null
-        val pageScaleAtZoom1 = dst.width / page.width.toFloat()
+        // [crop], when given, is what fills the viewer's width; the page centres off it.
+        val cropWidth = crop?.width() ?: page.width
+        if (cropWidth <= 0) return null
+        val pageScaleAtZoom1 = dst.width / cropWidth.toFloat()
         val pageScale = pageScaleAtZoom1 * scale
-        val anchorX =
-            dst.width / 2f + scale * (viewerOffsetX * dst.width + WebGpuRenderer.offsetX * dst.width)
+        val shiftX = crop?.let { pageScaleAtZoom1 * (page.width / 2f - it.exactCenterX()) }
+            ?: 0f
+        val shiftY = crop?.let { pageScaleAtZoom1 * (page.height / 2f - it.exactCenterY()) }
+            ?: 0f
+        val anchorX = dst.width / 2f +
+                scale * (viewerOffsetX * dst.width + WebGpuRenderer.offsetX * dst.width + shiftX)
         val anchorY =
             dst.height / 2f - scale * cameraDocY + scale * WebGpuRenderer.offsetY * dst.height
         // The caller's measured height, never one derived here - the two must agree exactly.
-        val centerYOffset = scale * (docTop + pageHeight / 2f)
+        val centerYOffset = scale * (docTop + pageHeight / 2f + shiftY)
         return ContinuousAnchor(pageScale, anchorX, anchorY, centerYOffset)
     }
 
@@ -1354,10 +1363,12 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         pageHeight: Float,
         viewerOffsetX: Float,
         scale: Float,
-        suppressGeneration: Boolean
+        suppressGeneration: Boolean,
+        crop: Rect? = null,
     ): Boolean {
-        val a = continuousAnchor(page, dst, cameraDocY, docTop, pageHeight, viewerOffsetX, scale)
-            ?: return false
+        val a = continuousAnchor(
+            page, dst, cameraDocY, docTop, pageHeight, viewerOffsetX, scale, crop
+        ) ?: return false
         return traced("wgv:tilesDraw") {
             drawCore(
                 pass,

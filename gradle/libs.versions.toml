@@ -1,7 +1,7 @@
 [versions]
-agp = "9.4.0"
+agp = "9.4.1"
 animationCore = "1.12.1"
-core = "1.19.0"
+core = "1.19.1"
 kotlin = "2.4.20"
 
 [plugins]
@@ -10,7 +10,9 @@ android-library = { id = "com.android.library", version.ref = "agp" }
 kotlin-compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 
 [libraries]
-androidx-annotation = { module = "androidx.annotation:annotation", version = "1.10.0" }
+androidx-annotation = { module = "androidx.annotation:annotation", version = "1.11.0" }
+androidx-annotation-experimental = { module = "androidx.annotation:annotation-experimental", version = "1.6.0" }
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version = "1.11.0" }
 androidx-appcompat = { module = "androidx.appcompat:appcompat", version = "1.8.0" }
 androidx-viewpager = { module = "androidx.viewpager:viewpager", version = "1.1.0" }
 

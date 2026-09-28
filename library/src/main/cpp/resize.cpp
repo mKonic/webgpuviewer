@@ -45,12 +45,12 @@ inline uint8_t exactLinearToAlpha(float linearAlpha) {
   return static_cast<uint8_t>(std::roundf(linearAlpha * 255.0f));
 }
 
-/* A mismatched size/buffer here indexes past its end rather than throwing, so
- * both are checked. */
-extern "C" JNIEXPORT void JNICALL
-Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNative(
-    JNIEnv *env, jobject thiz, jobject src_buffer, jobject dst_buffer,
-    jint srcWidth, jint srcHeight) {
+/* Box filter in linear light to any size; a larger one repeats pixels. A
+ * mismatched size/buffer indexes past its end rather than throwing, so both are
+ * checked. */
+static void resizeArea(JNIEnv *env, jobject src_buffer, jobject dst_buffer,
+                       jint srcWidth, jint srcHeight, jint dstWidth,
+                       jint dstHeight) {
   initLUTs();
 
   if (!env || !src_buffer || !dst_buffer)
@@ -74,8 +74,6 @@ Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNative(
   if (srcCapacity < 0 || srcCapacity < srcNeeded)
     return;
 
-  int dstWidth = srcWidth / 2;
-  int dstHeight = srcHeight / 2;
   if (dstWidth <= 0 || dstHeight <= 0)
     return;
 
@@ -291,4 +289,20 @@ Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNative(
           (finalA << 24) | (finalR << 16) | (finalG << 8) | finalB;
     }
   }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaNative(
+    JNIEnv *env, jobject thiz, jobject src_buffer, jobject dst_buffer,
+    jint srcWidth, jint srcHeight) {
+  resizeArea(env, src_buffer, dst_buffer, srcWidth, srcHeight, srcWidth / 2,
+             srcHeight / 2);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaToNative(
+    JNIEnv *env, jobject thiz, jobject src_buffer, jobject dst_buffer,
+    jint srcWidth, jint srcHeight, jint dstWidth, jint dstHeight) {
+  resizeArea(env, src_buffer, dst_buffer, srcWidth, srcHeight, dstWidth,
+             dstHeight);
 }

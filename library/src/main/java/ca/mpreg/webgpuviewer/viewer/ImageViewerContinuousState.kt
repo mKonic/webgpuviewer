@@ -1,10 +1,12 @@
 package ca.mpreg.webgpuviewer.viewer
 
+import android.graphics.Rect
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
 import androidx.compose.ui.util.fastCoerceIn
 import androidx.webgpu.GPUCommandEncoder
+import androidx.webgpu.GPURenderPassEncoder
 import androidx.webgpu.GPUTexture
 import ca.mpreg.webgpuviewer.closeTo
 import ca.mpreg.webgpuviewer.draw.Draw
@@ -17,6 +19,7 @@ import ca.mpreg.webgpuviewer.viewer.ImageViewerContinuousState.Companion.MAX_VIS
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlin.math.max
+import kotlin.math.roundToInt
 
 class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     companion object {
@@ -141,9 +144,29 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
      */
     fun getPageHeight(page: ImagePage): Float {
         if (page !is ImagePage.ImageSingle) return page.height.toFloat()
-        val pageWidth = page.width
+        val crop = cropOf(page)
+        val pageWidth = crop?.width() ?: page.width
         if (pageWidth <= 0 || width <= 0) return page.height.toFloat()
-        return page.height * (width.toFloat() / pageWidth)
+        return (crop?.height() ?: page.height) * (width.toFloat() / pageWidth)
+    }
+
+    /**
+     * Cut each page to its measured trim: the trim fills the width, its slot is the trim's
+     * height, and nothing outside it draws. Unlike the paged viewer, no zoom is involved.
+     */
+    var cropBorders: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            currentPageHeight = null
+            invalidate()
+        }
+
+    /** The part of [page] drawn, in its own pixels; null for all of it. */
+    private fun cropOf(page: ImagePage.ImageSingle): Rect? {
+        if (!cropBorders) return null
+        val trim = page.image?.trim ?: return null
+        return if (trim.width() > 0 && trim.height() > 0) Rect(trim) else null
     }
 
     /**
@@ -527,6 +550,8 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         val docTop: Float,
         val pageHeight: Float,
         val contentHeight: Float,
+        /** As [getPageHeight] measured it, so the draw places what the layout sized. */
+        val crop: Rect?,
     )
 
     private class ContinuousRenderSnapshot(
@@ -540,6 +565,8 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
         val backgroundColor: Int,
         val readThrough: ImagePage?,
     )
+
+    private fun cropFor(page: ImagePage) = (page as? ImagePage.ImageSingle)?.let(::cropOf)
 
     override fun captureRenderState(): Any {
         val snapshot = captureLocked()
@@ -624,7 +651,9 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             // Walked upward, so each goes in front of the last - top to bottom, as the
             // forward walk appends.
             if (page.isDecoded) {
-                pages.add(0, VisiblePage(page, docTopBack, pageHeight, contentHeight))
+                pages.add(
+                    0, VisiblePage(page, docTopBack, pageHeight, contentHeight, cropFor(page))
+                )
             }
             if (pageHeight <= 0f) break
             iBack--
@@ -654,7 +683,9 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
 
             if (y + pageHeight > visTop) {
                 visible.add(page)
-                if (page.isDecoded) pages.add(VisiblePage(page, docTop, pageHeight, contentHeight))
+                if (page.isDecoded) {
+                    pages.add(VisiblePage(page, docTop, pageHeight, contentHeight, cropFor(page)))
+                }
             }
 
             // A zero-height page never advances y, so stop.
@@ -677,6 +708,29 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             pages, scale, offsetX, cameraDocY, isScaleAnimating || isFlinging, backgroundColor,
             scrolledThrough
         )
+    }
+
+    /**
+     * Limits [pass] to [vp]'s content band, where a cropped page's margins would otherwise land
+     * on its neighbours. False when none of it is on screen.
+     */
+    private fun scissorToSlot(
+        pass: GPURenderPassEncoder,
+        anchorX: Float,
+        anchorY: Float,
+        vp: VisiblePage,
+        scale: Float,
+        dstW: Float,
+        dstH: Float,
+    ): Boolean {
+        val l = (anchorX - scale * dstW / 2f).roundToInt().coerceIn(0, dstW.toInt())
+        val r = (anchorX + scale * dstW / 2f).roundToInt().coerceIn(0, dstW.toInt())
+        val t = (anchorY + scale * vp.docTop).roundToInt().coerceIn(0, dstH.toInt())
+        val b = (anchorY + scale * (vp.docTop + vp.contentHeight)).roundToInt()
+            .coerceIn(0, dstH.toInt())
+        if (r <= l || b <= t) return false
+        pass.setScissorRect(l, t, r - l, b - t)
+        return true
     }
 
     override suspend fun renderSnapshot(
@@ -711,7 +765,16 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                     // image buffers gone, and drawing one throws.
                     if (page.destroyed || !page.isDecoded || page.width <= 0) return@forEach
 
-                    val pageScale = dstW / page.width
+                    // A crop fills the width, and the page's own centre sits off the crop's.
+                    val crop = vp.crop
+                    val pageScale = dstW / (crop?.width() ?: page.width)
+                    val shiftX = crop?.let { pageScale * (page.width / 2f - it.exactCenterX()) }
+                        ?: 0f
+                    val shiftY = crop?.let { pageScale * (page.height / 2f - it.exactCenterY()) }
+                        ?: 0f
+                    if (crop != null &&
+                        !scissorToSlot(pass, anchorX, anchorY, vp, s.scale, dstW, dstH)
+                    ) return@forEach
 
                     // Tiles first, marking the stencil; the sampler below shades only what is
                     // left, and nothing once the draw reports full coverage. Animated pages
@@ -725,15 +788,16 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                         vp.contentHeight,
                         s.offsetX,
                         s.scale,
-                        s.suppressGeneration
+                        s.suppressGeneration,
+                        crop,
                     )
                     if (!covered) {
                         page.forEachImage { image, srcOffsetX, sideScale ->
                             if (image.mipmaps.isEmpty()) return@forEachImage
                             val imageScale = pageScale * s.scale * sideScale
                             val docCenterX =
-                                pageScale * (srcOffsetX + sideScale * image.x)
-                            val docCenterY = vp.docTop + 0.5f * vp.contentHeight +
+                                shiftX + pageScale * (srcOffsetX + sideScale * image.x)
+                            val docCenterY = vp.docTop + 0.5f * vp.contentHeight + shiftY +
                                     pageScale * sideScale * image.y
                             val targetX = anchorX + s.scale * docCenterX
                             val targetY = anchorY + s.scale * docCenterY
@@ -765,6 +829,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                             (top + s.scale * vp.contentHeight) / dstH
                         )
                     }
+                    if (crop != null) pass.setScissorRect(0, 0, texture.width, texture.height)
                 }
             }
         } else {

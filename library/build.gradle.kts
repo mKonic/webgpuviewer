@@ -65,7 +65,7 @@ android {
     }
 }
 
-val embed: Configuration = configurations.create("embed")
+val embed: Configuration = configurations.create("embed") { isTransitive = false }
 configurations.named("compileOnly") { extendsFrom(embed) }
 
 dependencies {
@@ -75,6 +75,9 @@ dependencies {
     implementation(libs.androidx.compose.foundation)
 
     embed(libs.androidx.webgpu)
+    // androidx.webgpu dependencies
+    implementation(libs.androidx.annotation.experimental)
+    implementation(libs.kotlinx.coroutines.core)
 }
 
 androidComponents {

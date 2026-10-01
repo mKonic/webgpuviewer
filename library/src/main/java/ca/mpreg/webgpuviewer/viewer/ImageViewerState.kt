@@ -239,6 +239,12 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
      */
     @Volatile
     protected var onScreenPages: List<ImagePage> = emptyList()
+        set(value) {
+            val was = field
+            field = value
+            // After the assignment, so a page woken by it finds itself on screen.
+            for (page in value) if (page !in was) page.cameOnScreen()
+        }
 
     /**
      * Whether [page] - or a spread holding it - was drawn by the last frame. A host hit testing
@@ -453,7 +459,7 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
         // starts mostly sharp. Gated on atHome: the tile cache is keyed by (x, y, scale).
         if (covered && page is ImagePage.ImageSingle && page.atHome) {
             val next = s.nextPage as? ImagePage.ImageSingle
-            if (next != null && next.highQuality && !next.isAnimated && next.atHome) {
+            if (next != null && next.highQuality && next.atHome) {
                 tiles.prewarm(next, texture)
             }
         }

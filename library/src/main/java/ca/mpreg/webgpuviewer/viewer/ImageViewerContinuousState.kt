@@ -777,9 +777,8 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                     ) return@forEach
 
                     // Tiles first, marking the stencil; the sampler below shades only what is
-                    // left, and nothing once the draw reports full coverage. Animated pages
-                    // never get tiles.
-                    val covered = !page.isAnimated && tiles.draw(
+                    // left, and nothing once the draw reports full coverage.
+                    val covered = tiles.draw(
                         pass,
                         page,
                         texture,
@@ -804,15 +803,7 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                             val (x, y) = solveImagePlacement(
                                 targetX, targetY, imageScale, image, dstW, dstH
                             )
-                            // Non-highQuality content skips linear light; an animated page
-                            // swaps images every frame, so it takes the fast sampler too.
-                            if (page.isAnimated || page.highQuality) {
-                                RenderPage.renderFast(pass, image, texture, x, y, imageScale)
-                            } else {
-                                RenderPage.renderFast(
-                                    pass, image, texture, x, y, imageScale, linear = false
-                                )
-                            }
+                            RenderPage.renderFast(pass, image, texture, x, y, imageScale)
                         }
                     }
 

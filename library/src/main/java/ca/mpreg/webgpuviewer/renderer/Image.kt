@@ -14,6 +14,7 @@ import ca.mpreg.webgpuviewer.renderer.Image.Companion.invoke
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.math.floor
 import kotlin.math.log2
 import kotlin.math.round
@@ -78,6 +79,16 @@ class Image private constructor(
      */
     var trim: Rect? = null
 
+    /**
+     * How HDR source pixels were fitted at creation - peak kept in half-float and scaled to
+     * [HdrFit.target], or tone mapped (target 1) - so [update] and [twin] fit later frames the
+     * same way instead of each by its own peak. Null for an SDR source.
+     */
+    internal var hdrFit: HdrFit? = null
+        private set
+
+    internal class HdrFit(val peak: Float, val target: Float)
+
     companion object {
         suspend operator fun invoke(
             pixels: ByteBuffer, width: Int, height: Int,
@@ -95,6 +106,8 @@ class Image private constructor(
              * the image is whole.
              */
             validRows: Int = height,
+            /** Fit PQ/HLG to this source peak rather than the pixels' own - see [twin]. */
+            hdrPeak: Float = 0f,
         ): Image {
             require(width > 0 && height > 0) { "Image dimensions must be positive" }
             require(validRows in 0..height) { "validRows must be within the image" }
@@ -114,6 +127,7 @@ class Image private constructor(
             @Suppress("NAME_SHADOWING") var pixels = pixels
             var keepHdr = false
             var headroom = hdrHeadroom
+            var fit: HdrFit? = null
 
             // A ceiling of 1.0 is a host asking for no headroom at all, and there is then nothing
             // to keep: the branches below fall through to the SDR ones, which is what makes that
@@ -169,20 +183,32 @@ class Image private constructor(
                 // frame that fills the headroom and one five stops too dim.
                 hdr && canHdr -> {
                     keepHdr = true
-                    val peak = withContext(Dispatchers.Default) {
+                    val target = Hdr.presentPeak
+                    val (source, peak) = withContext(Dispatchers.Default) {
                         traced("wgv:hdrPeak") {
-                            ImageUtil.scaleHdrPeakNative(pixels, width, height, Hdr.presentPeak)
+                            val source = hdrPeak.takeIf { it >= 1f }
+                                ?: ImageUtil.measureHdrPeakNative(pixels, width, height)
+                            source to
+                                ImageUtil.scaleHdrPeakNative(pixels, width, height, target, source)
                         }
                     }
                     headroom = log2(peak.coerceAtLeast(1f))
+                    fit = HdrFit(source, target)
                 }
 
                 // Float pixels with nowhere to put them: tone map once, at upload.
                 hdr -> {
+                    val source = withContext(Dispatchers.Default) {
+                        hdrPeak.takeIf { it >= 1f }
+                            ?: ImageUtil.measureHdrPeakNative(pixels, width, height)
+                    }
                     pixels = withContext(Dispatchers.Default) {
-                        traced("wgv:toneMap") { ImageUtil.toneMapToSdr(pixels, width, height) }
+                        traced("wgv:toneMap") {
+                            ImageUtil.toneMapToSdr(pixels, width, height, source)
+                        }
                     }
                     headroom = 0f
+                    fit = HdrFit(source, 1f)
                 }
             }
 
@@ -198,6 +224,7 @@ class Image private constructor(
             }
 
             val image = Image(width, height, isHdr = keepHdr, hdrHeadroom = headroom)
+            image.hdrFit = fit
 
             try {
                 return finishImage(
@@ -385,11 +412,15 @@ class Image private constructor(
     }
 
     /**
-     * Rewrites this image in its own textures from [pixels], a full image of this size in its
-     * texel format (half-float if [isHdr]) of which only [rect] changed. Smaller levels are
-     * rebuilt whole. Chunked and yielding, so frames keep drawing. False if cleaned up part way.
+     * Rewrites this image in its own textures from [pixels], a full image of this size of which
+     * only [rect] changed. In the texel format (half-float if [isHdr]), or for an HDR source the
+     * source's half-float, fitted as at creation; [pixels] itself is left alone. Smaller levels
+     * are rebuilt whole. Chunked and yielding, so frames keep drawing. False if cleaned up part
+     * way.
+     * Not to be called concurrently with itself, [createMipMaps] or [measure].
      */
     suspend fun update(pixels: ByteBuffer, rect: Rect? = null): Boolean {
+        @Suppress("NAME_SHADOWING") val pixels = fitHdr(pixels)
         requireFullImage(pixels)
         val levels = mipmaps.toList()
         val base = levels.firstOrNull() ?: return false
@@ -408,6 +439,7 @@ class Image private constructor(
 
     /** Adds the smaller levels [invoke]'s createMipMaps makes, from [pixels] as in [update]. */
     suspend fun createMipMaps(pixels: ByteBuffer) {
+        @Suppress("NAME_SHADOWING") val pixels = fitHdr(pixels)
         requireFullImage(pixels)
         val base = mipmaps.firstOrNull() ?: error("Image has no textures")
         if (mipmaps.size > 1) return
@@ -433,6 +465,49 @@ class Image private constructor(
         }
     }
 
+    /**
+     * Another image like this one - size, texel format, HDR fit, background - from [pixels], a
+     * later frame in the form [update] takes. For swapping with it frame by frame.
+     */
+    suspend fun twin(pixels: ByteBuffer): Image = invoke(
+        pixels, width, height,
+        createMipMaps = false,
+        backgroundColor = backgroundColor,
+        hdr = hdrFit != null,
+        hdrHeadroom = hdrHeadroom,
+        hdrPeak = hdrFit?.peak ?: 0f,
+    )
+
+    // [fitHdr]'s output, reused: a frame's worth a call would otherwise pile up until a GC.
+    private var fitScratch: ByteBuffer? = null
+
+    /** [pixels], an HDR source's half-float, fitted as at creation into [fitScratch]. */
+    private suspend fun fitHdr(pixels: ByteBuffer): ByteBuffer {
+        val fit = hdrFit ?: return pixels
+        val need = width.toLong() * height * (if (isHdr) 8 else 4)
+        require(need <= Int.MAX_VALUE) { "${width}x$height is too large to fit" }
+        val source = width.toLong() * height * 8
+        require(pixels.isDirect && pixels.capacity() >= source) {
+            "HDR pixels hold ${pixels.capacity()} B, ${width}x$height needs $source"
+        }
+        val out = fitScratch?.takeIf { it.capacity().toLong() == need }
+            ?: ByteBuffer.allocateDirect(need.toInt()).order(ByteOrder.nativeOrder())
+                .also { fitScratch = it }
+        return withContext(Dispatchers.Default) {
+            out.clear()
+            if (isHdr) {
+                // Scaled in place, so into a copy.
+                val src = pixels.duplicate()
+                src.clear().limit(need.toInt())
+                out.put(src).clear()
+                ImageUtil.scaleHdrPeakNative(out, width, height, fit.target, fit.peak)
+            } else {
+                ImageUtil.toneMapToSdrNative(pixels, out, width, height, fit.peak)
+            }
+            out
+        }
+    }
+
     /** A short buffer would have writeTexture read past it, and the native resize silently skip. */
     private fun requireFullImage(pixels: ByteBuffer) {
         val need = width.toLong() * height * (if (isHdr) 8 else 4)
@@ -451,6 +526,7 @@ class Image private constructor(
         trimThreshold: Float = 0.05f,
         backgroundColor: Int? = null,
     ) {
+        @Suppress("NAME_SHADOWING") val pixels = fitHdr(pixels)
         val (newTrim, background) = withContext(Dispatchers.Default) {
             measurePixels(pixels, width, height, isHdr, trimColors, trimThreshold, backgroundColor)
         }
@@ -501,6 +577,7 @@ class Image private constructor(
         mipmaps.clear()
         _buffer?.destroyAndRelease()
         _buffer = null
+        fitScratch = null
     }
 
     /**

@@ -1198,7 +1198,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * with [drawCore] (see [forEachTile]'s doc). Null if the page isn't drawable.
      */
     fun availableTileKeys(page: ImagePage.ImageSingle, dst: GPUTexture): Set<Long>? {
-        if (page.destroyed || !page.highQuality || page.isAnimated) return null
+        if (page.destroyed || !page.highQuality) return null
         if (!page.hasUploadedImage) return null
 
         val st = pages[page] ?: return null
@@ -1232,7 +1232,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * displaced becomes current and calls [draw] again.
      */
     fun prewarm(page: ImagePage.ImageSingle, dst: GPUTexture) {
-        if (page.destroyed || !page.highQuality || page.isAnimated) return
+        if (page.destroyed || !page.highQuality) return
         if (!page.hasUploadedImage) return
 
         viewportWidth = dst.width
@@ -1404,7 +1404,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         applyRetainWindow: Boolean,
         useStencilMask: Boolean = false
     ): Boolean {
-        if (page.destroyed || !page.highQuality || page.isAnimated) return false
+        if (page.destroyed || !page.highQuality) return false
         if (!page.hasUploadedImage) return false
 
         // Unlike drawGridForFullPage, nothing else on this path reports the draw to Hdr.
@@ -1956,7 +1956,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     private fun drawGridForFullPage(
         pass: GPURenderPassEncoder, page: ImagePage.ImageSingle, dst: GPUTexture
     ): PageTiles? {
-        if (page.destroyed || !page.highQuality || page.isAnimated) return null
+        if (page.destroyed || !page.highQuality) return null
         // This path draws cached tiles without touching the image, so it has to report for itself.
         page.currentImage?.let { if (it.isHdr) Hdr.noteHdrDrawn(it, it.hdrHeadroom) }
         if (!page.hasUploadedImage) return null

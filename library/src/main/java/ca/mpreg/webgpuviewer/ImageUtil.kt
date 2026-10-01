@@ -71,7 +71,12 @@ object ImageUtil {
         dstPixels: ByteBuffer,
         width: Int,
         height: Int,
+        /** Fitted to this rather than the pixels' own, when at least 1. */
+        sourcePeak: Float,
     )
+
+    /** Brightest linear channel of extended-sRGB half-float [pixels], at least 1. */
+    external fun measureHdrPeakNative(pixels: ByteBuffer, width: Int, height: Int): Float
 
     /**
      * Combine an SDR base with its unapplied gain map into extended-sRGB half-float.
@@ -117,6 +122,8 @@ object ImageUtil {
         width: Int,
         height: Int,
         targetPeak: Float,
+        /** As [toneMapToSdrNative]'s. */
+        sourcePeak: Float,
     ): Float
 
     /**
@@ -225,9 +232,11 @@ object ImageUtil {
     }
 
     /** [toneMapToSdrNative] into a freshly allocated RGBA8 buffer. */
-    fun toneMapToSdr(source: ByteBuffer, width: Int, height: Int): ByteBuffer {
+    fun toneMapToSdr(
+        source: ByteBuffer, width: Int, height: Int, sourcePeak: Float = 0f
+    ): ByteBuffer {
         val output = directBuffer(width, height, 4)
-        toneMapToSdrNative(source, output, width, height)
+        toneMapToSdrNative(source, output, width, height, sourcePeak)
         return output
     }
 }

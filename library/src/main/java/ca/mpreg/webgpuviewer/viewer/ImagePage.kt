@@ -41,10 +41,11 @@ import ca.mpreg.webgpuviewer.renderer.TileRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.endAndRelease
 import ca.mpreg.webgpuviewer.renderer.traced
-import java.nio.ByteBuffer
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
@@ -372,22 +373,15 @@ open class ImagePage {
      */
     open class ImageSingle(val image: Image?) : ImagePage() {
 
-        /** Animated from the start - no separate [startAnimationLoop] call needed. */
-        constructor(frames: List<Pair<Image, Int>>) : this(frames.firstOrNull()?.first) {
-            startAnimationLoop(frames)
-        }
-
         /** If true, this page owns its image and will clean it up. If false, it's borrowed - see
          *  [ImageSpread], which composes existing pages without taking ownership of their images. */
         var ownsImage: Boolean = true
 
         /**
          * When false, this page skips [ca.mpreg.webgpuviewer.renderer.TileRenderer]'s tile cache
-         * entirely and its fast path renders through [renderPage] with `linear = false` instead of
-         * the default `linear = true` - for content not worth either path's extra correctness or
-         * sharpness, such as an app-drawn transition/error bitmap. A `var`, not a `val`, so
-         * [ImageSpread] can override it to fan a set-through to both sides instead of just holding
-         * its own copy.
+         * and draws straight from its image - for content that changes too often to tile (an
+         * animation, a progressive preview) or isn't worth it (an app-drawn bitmap). A `var`, not
+         * a `val`, so [ImageSpread] can fan a set-through to both sides.
          */
         open var highQuality: Boolean = true
 
@@ -417,14 +411,20 @@ open class ImagePage {
 
         // Written by the animation loop on its own dispatcher, read by the render thread.
         @Volatile
-        private var frames: List<Pair<Image, Int>>? = null
-
-        @Volatile
         private var currentFrameImage: Image? = null
 
-        /** True while an animation frame loop owns [currentImage]. The tile cache skips animated pages. */
-        override val isAnimated: Boolean
-            get() = frames != null
+        /** The image [image] swaps with while animating; this page's own. Under this monitor. */
+        private var backImage: Image? = null
+
+        // Bumped by each [animate], so a loop it replaced can't swap or keep a back image.
+        private var animationGeneration = 0
+
+        // Wakes an animation paused off screen.
+        private val shown = Channel<Unit>(Channel.CONFLATED)
+
+        override fun cameOnScreen() {
+            shown.trySend(Unit)
+        }
 
         private val _frameVersion = AtomicInteger()
 
@@ -475,93 +475,127 @@ open class ImagePage {
             super.invalidate()
         }
 
+        /**
+         * Plays an animation from [image], its frame 0, shown for [firstDuration] ms. [next]
+         * gives each frame after it in turn, or null to end on the one shown - looping is its
+         * to do. [release] runs once the animation is done with.
+         *
+         * Two images take turns: the next frame uploads into the hidden one while the other
+         * shows, so a frame is never seen half-written and swaps in on time. Holds its frame
+         * while off screen.
+         */
         @Synchronized
-        fun startAnimationLoop(frames: List<Pair<Image, Int>>) {
-            // Nothing cancels the loop twice, so one started after cleanup holds every frame.
-            if (destroyed) return
-
+        fun animate(
+            firstDuration: Int,
+            release: () -> Unit = {},
+            next: suspend () -> AnimationFrame?,
+        ) {
+            if (destroyed || image == null) {
+                runRelease(release)
+                return
+            }
             animationLoop?.cancel()
-            this.frames = frames
-            currentFrameImage = frames.firstOrNull()?.first
-
-            // Use the page's scope if available, otherwise use the shared background scope
-            val loopScope = scope ?: cleanupScope
-            animationLoop = loopScope.launch {
-                var frameIndex = 0
-                while (true) {
-                    synchronized(this@ImageSingle) {
-                        if (destroyed) null
-                        else this@ImageSingle.frames?.getOrNull(frameIndex)
-                            ?.also { currentFrameImage = it.first }
-                    }?.let { (_, duration) ->
-                        // Keeps running off screen - frames stay in step with their durations,
-                        // and invalidate() asks for a redraw only while there is one to ask for.
-                        invalidate()
-                        if ((this@ImageSingle.frames?.size ?: 0) <= 1) return@launch
-                        delay(duration.coerceAtLeast(MIN_FRAME_MILLIS).milliseconds)
-                    } ?: break
-                    frameIndex = (frameIndex + 1) % (this@ImageSingle.frames?.size ?: 1)
+            // The replaced loop's back image is its own; this one starts again from [image].
+            backImage?.let(::releaseImage)
+            backImage = null
+            currentFrameImage = null
+            val generation = ++animationGeneration
+            // A tile grid would be cut again for every frame.
+            highQuality = false
+            animationLoop = (scope ?: cleanupScope).launch {
+                try {
+                    play(next, firstDuration, generation)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // Ends on the frame shown: the page's scope has no handler.
+                    Log.w("ImagePage", "Animation stopped", e)
+                } finally {
+                    runRelease(release)
                 }
             }
         }
 
-        /**
-         * Plays [frameCount] frames that are decoded as they come due rather than held, for an
-         * animation too large to keep every frame on the GPU. The two [slots] take turns: the
-         * next frame is written into the one off screen while the other shows, so a frame never
-         * changes while it is drawn. Built by the caller from frames 0 and 1.
-         *
-         * [frame] returns frame i's pixels in the slots' texel format, or null to stop the
-         * animation where it is. It is only asked while the page is on screen; off screen the
-         * loop keeps time without decoding, and picks up at the frame then due.
-         *
-         * Returns the loop, which ends when the page is cleaned up (or [frame] gives up), so the
-         * caller knows when to release whatever [frame] reads from; null if already cleaned up.
-         */
-        fun startStreamedAnimation(
-            slots: List<Image>,
-            frameCount: Int,
-            duration: (Int) -> Int,
-            frame: suspend (Int) -> ByteBuffer?,
-        ): Job? {
-            require(slots.size == 2) { "a streamed animation takes two slots" }
-            require(frameCount >= 2) { "a streamed animation takes at least two frames" }
-            if (destroyed) return null
+        // The host's, run where nothing would catch a throw.
+        private fun runRelease(release: () -> Unit) {
+            try {
+                release()
+            } catch (e: Exception) {
+                Log.e("ImagePage", "Animation release failed", e)
+            }
+        }
 
-            animationLoop?.cancel()
-            // As frames, so cleanup frees both slots and the page reads as animated.
-            this.frames = slots.map { it to 0 }
-            currentFrameImage = slots[0]
-
-            val loopScope = scope ?: cleanupScope
-            animationLoop = loopScope.launch {
-                var index = 0
-                var shown = 0
-                // The caller built the hidden slot from frame 1.
-                var nextReady = true
-                while (true) {
-                    val started = System.nanoTime()
-                    val next = (index + 1) % frameCount
-                    if (!nextReady && isOnScreen) {
-                        val pixels = frame(next) ?: break
-                        if (!slots[1 - shown].update(pixels)) break
-                        nextReady = true
-                    }
-                    val spentMs = (System.nanoTime() - started) / 1_000_000
-                    val waitMs = duration(index).coerceAtLeast(MIN_FRAME_MILLIS) - spentMs
-                    if (waitMs > 0) delay(waitMs.milliseconds)
-                    if (this@ImageSingle.frames == null) break
-
-                    index = next
-                    if (nextReady) {
-                        shown = 1 - shown
-                        currentFrameImage = slots[shown]
-                        nextReady = false
-                        invalidate()
-                    }
+        /** Frees [img] off this page: its HDR claim now, its textures on the render thread. */
+        private fun releaseImage(img: Image) {
+            img.releaseHdr()
+            cleanupScope.launch {
+                try {
+                    WebGpuRenderer.onDispatcher { img.cleanup() }
+                } catch (e: Exception) {
+                    Log.e("ImagePage", "Cleanup error", e)
                 }
             }
-            return animationLoop
+        }
+
+        private suspend fun play(
+            next: suspend () -> AnimationFrame?,
+            firstDuration: Int,
+            generation: Int,
+        ) {
+            var front = image ?: return
+            var back: Image? = null
+            var shownAt = SystemClock.uptimeMillis()
+            var showFor = firstDuration.coerceAtLeast(MIN_FRAME_MILLIS).toLong()
+
+            while (true) {
+                if (!isOnScreen) {
+                    while (!isOnScreen) shown.receive()
+                    shownAt = SystemClock.uptimeMillis()
+                }
+
+                val frame = next() ?: return
+                val duration = frame.duration.coerceAtLeast(MIN_FRAME_MILLIS).toLong()
+                val due = shownAt + showFor
+                try {
+                    // Late frames still show, as soon as they're ready: a decode slower than the
+                    // frame rate would never catch up by skipping.
+                    val target = back
+                    if (target == null) {
+                        val made = front.twin(frame.pixels)
+                        val kept = synchronized(this) {
+                            val live = !destroyed && generation == animationGeneration
+                            if (live) backImage = made
+                            live
+                        }
+                        if (!kept) {
+                            releaseImage(made)
+                            return
+                        }
+                        back = made
+                    } else if (!target.update(frame.pixels)) {
+                        return
+                    }
+                } finally {
+                    frame.close()
+                }
+
+                val wait = due - SystemClock.uptimeMillis()
+                if (wait > 0) delay(wait)
+
+                val shown = back
+                synchronized(this) {
+                    if (destroyed || generation != animationGeneration) return
+                    currentFrameImage = shown
+                }
+                invalidate()
+                back = front
+                front = shown
+
+                // Behind by more than a frame: resync rather than race to catch up.
+                val now = SystemClock.uptimeMillis()
+                shownAt = if (now - due > duration) now else due
+                showFor = duration
+            }
         }
 
         override fun renderWith(
@@ -584,7 +618,7 @@ open class ImagePage {
                 )
             )
             try {
-                renderPage(pass, dst, x, y, scale, linear = false, masked = false)
+                renderPage(pass, dst, x, y, scale, masked = false)
             } finally {
                 pass.endAndRelease(targetView)
             }
@@ -636,29 +670,14 @@ open class ImagePage {
         }
 
         /**
-         * As [ImagePage.drawLive]. Animated frames always want the fast path regardless of
-         * [highQuality] (never worth a tile cache that would just churn every frame); a
-         * non-[highQuality], non-animated page falls back to the plain [renderWith] (via `super`);
-         * everything else goes through the tile cache, backfilling with [renderPage] wherever it
-         * isn't covered yet. Opens its own pass (with a stencil attachment, for [TileRenderer]'s
-         * masking) rather than sharing one from the caller - see [Render] for why that split exists.
+         * As [ImagePage.drawLive]: through the tile cache when [highQuality], backfilling with
+         * [renderPage] wherever it isn't covered yet, else [renderPage] alone. Opens its own pass
+         * (with a stencil attachment, for [TileRenderer]'s masking) rather than sharing one from
+         * the caller - see [Render] for why that split exists.
          */
         override fun drawLive(
             encoder: GPUCommandEncoder, dst: GPUTexture, tiles: TileRenderer
         ): Boolean {
-            if (isAnimated) {
-                val pass = beginLivePass(encoder, dst, tiles)
-                try {
-                    renderBackground(pass, dst, 0f, 0f, 1f)
-                    renderPage(pass, dst, 0f, 0f, 1f)
-                } finally {
-                    pass.endAndRelease()
-                }
-                return false
-            }
-
-            if (!highQuality) return super.drawLive(encoder, dst, tiles)
-
             val pass = beginLivePass(encoder, dst, tiles)
             try {
                 // Background always drawn live first (its fades are position-dependent, never
@@ -667,7 +686,7 @@ open class ImagePage {
                 // renderPage then only shades what's left uncovered instead of the whole
                 // viewport, since tiles.draw() already produced the right pixel wherever it drew.
                 renderBackground(pass, dst, 0f, 0f, 1f)
-                val covered = tiles.draw(pass, this, dst, 0f, 0f, 1f)
+                val covered = highQuality && tiles.draw(pass, this, dst, 0f, 0f, 1f)
                 if (!covered) {
                     renderPage(pass, dst, 0f, 0f, 1f)
                 }
@@ -688,45 +707,16 @@ open class ImagePage {
         }
 
         /**
-         * As [drawLive], seeding a transition's cache slot instead of the screen - same
-         * isAnimated/highQuality precedence, but never with a stencil attachment (a transition's
-         * cache is never stencil-masked either way).
+         * As [drawLive], seeding a transition's cache slot instead of the screen - never with a
+         * stencil attachment (a transition's cache is never stencil-masked either way).
          */
         override fun renderCacheSeed(
             encoder: GPUCommandEncoder, tex: GPUTexture, tiles: TileRenderer
         ) {
-            if (isAnimated) {
-                val pass = beginCachePass(encoder, tex)
-                try {
-                    renderPage(pass, tex, 0f, 0f, 1f, masked = false)
-                    if (fade < 1f) {
-                        fadeRect(tex)?.let {
-                            drawFade(
-                                pass,
-                                tex.format,
-                                it[0],
-                                it[1],
-                                it[2],
-                                it[3],
-                                false
-                            )
-                        }
-                    }
-                } finally {
-                    pass.endAndRelease()
-                }
-                return
-            }
-
-            if (!highQuality) {
-                super.renderCacheSeed(encoder, tex, tiles)
-                return
-            }
-
             val pass = beginCachePass(encoder, tex)
             try {
                 renderPage(pass, tex, 0f, 0f, 1f, masked = false)
-                tiles.blitAvailableTiles(pass, this, tex)
+                if (highQuality) tiles.blitAvailableTiles(pass, this, tex)
                 // A fade re-seeds the cache every frame (frameVersion), which is what lets a
                 // page fade in mid-turn at all.
                 if (fade < 1f) {
@@ -748,7 +738,7 @@ open class ImagePage {
         }
 
         override fun newlyAvailableTileKeys(tiles: TileRenderer, tex: GPUTexture): Set<Long>? =
-            if (!highQuality || isAnimated) null else tiles.availableTileKeys(this, tex)
+            if (!highQuality) null else tiles.availableTileKeys(this, tex)
 
         override fun renderIntoCache(
             encoder: GPUCommandEncoder,
@@ -957,24 +947,14 @@ open class ImagePage {
             animationLoop?.cancel()
             animationLoop = null
 
-            // The HDR claim was taken when the image was built, so it goes back either way.
-            if (!ownsImage) {
-                frames?.forEach { it.first.releaseHdr() }
-                image?.releaseHdr()
-                frames = null
-                currentFrameImage = null
-                return
-            }
-
-            val framesToClean = frames
-            frames = null
+            // Made by [animate], so this page's whatever [ownsImage] says.
+            val back = backImage
+            backImage = null
             currentFrameImage = null
 
-            // [startAnimationLoop] takes any list, so [image] may not be among the frames.
-            val imagesToClean = when (framesToClean) {
-                null -> listOfNotNull(image)
-                else -> (framesToClean.map { it.first } + listOfNotNull(image)).distinct()
-            }
+            // The HDR claim was taken when the image was built, so it goes back either way.
+            if (!ownsImage) image?.releaseHdr()
+            val imagesToClean = listOfNotNull(image.takeIf { ownsImage }, back)
 
             // Before the launch, not inside it: work needing the render dispatcher is what kept
             // HDR on after the last HDR page was evicted.
@@ -1009,7 +989,7 @@ open class ImagePage {
      * e.g. a cover with no partner.
      *
      * Composes existing pages rather than owning decoded images: drawing and animation delegate to
-     * whichever side is live via [ImageSingle.currentImage]/[isAnimated], so either can be an
+     * whichever side is live via [ImageSingle.currentImage], so either can be an
      * animated GIF independently. Never cleans up [left]/[right] - whoever built them owns that.
      *
      * A side may also be a [Render] page. It has no image to place, so it sits out [forEachImage]
@@ -1051,9 +1031,6 @@ open class ImagePage {
                 leftSingle?.highQuality = value
                 rightSingle?.highQuality = value
             }
-
-        override val isAnimated: Boolean
-            get() = left?.isAnimated == true || right?.isAnimated == true
 
         override val frameVersion: Int
             get() = (left?.frameVersion ?: 0) + (right?.frameVersion ?: 0)
@@ -1114,6 +1091,11 @@ open class ImagePage {
             super.attach(parent, scope, onInvalidate)
             left?.attach(parent, scope, onInvalidate)
             right?.attach(parent, scope, onInvalidate)
+        }
+
+        override fun cameOnScreen() {
+            left?.cameOnScreen()
+            right?.cameOnScreen()
         }
 
         /** True when either side paints itself rather than blitting a decoded image. */
@@ -1326,9 +1308,6 @@ open class ImagePage {
     @Volatile
     var destroyed = false
         private set
-
-    /** True while an animation frame loop owns the current frame. Only ever true for [Images]. */
-    open val isAnimated: Boolean get() = false
 
     /**
      * Incremented each time this page's drawn content changes - an animated [Images] frame, or a
@@ -1628,6 +1607,9 @@ open class ImagePage {
      * viewer never fetches itself but which still need a scope to animate in and a way back to
      * the screen.
      */
+    /** Called as this page joins the drawn ones. */
+    internal open fun cameOnScreen() {}
+
     internal open fun attach(
         parent: ImageViewerState, scope: CoroutineScope?, onInvalidate: () -> Unit
     ) {

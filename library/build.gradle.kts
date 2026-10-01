@@ -72,6 +72,7 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.annotation)
     implementation(libs.androidx.core)
+    implementation(libs.androidx.window)
     implementation(libs.androidx.compose.foundation)
 
     embed(libs.androidx.webgpu)

@@ -223,7 +223,8 @@ static AreaSpans area_spans(int src, int dst) {
     s.count[i] = hi - lo + 1;
     s.offset[i] = (int)s.weight.size();
     for (int p = lo; p <= hi; ++p) {
-      const double w = std::min((double)p + 1.0, end) - std::max((double)p, start);
+      const double w =
+          std::min((double)p + 1.0, end) - std::max((double)p, start);
       s.weight.push_back(w > 0.0 ? (float)w : 0.0f);
     }
   }
@@ -295,6 +296,40 @@ Java_ca_mpreg_webgpuviewer_ImageUtil_resizeLinearAreaToNativeF16(
   }
 }
 
+/* ------------------------------------------------------------------ peak */
+
+/* Brightest linear channel, at least 1.0. Non-finite samples are skipped: one
+ * infinity in a corrupt float source would become the peak, and every real
+ * highlight would compress against it. */
+static float measure_peak(const uint16_t *px, size_t count) {
+  float peak = 1.0f;
+  for (size_t i = 0; i < count; ++i) {
+    const uint16_t *q = px + i * 4;
+    for (int c = 0; c < 3; ++c) {
+      const float v = srgb_decode(half_to_float(q[c]));
+      if (std::isfinite(v) && v > peak)
+        peak = v;
+    }
+  }
+  return peak;
+}
+
+/* [given] if usable, else the pixels' own. */
+static float source_peak(float given, const uint16_t *px, size_t count) {
+  return std::isfinite(given) && given >= 1.0f ? given
+                                               : measure_peak(px, count);
+}
+
+extern "C" JNIEXPORT jfloat JNICALL
+Java_ca_mpreg_webgpuviewer_ImageUtil_measureHdrPeakNative(
+    JNIEnv *env, jobject thiz, jobject buffer, jint width, jint height) {
+  const size_t count = pixel_count(width, height, 8);
+  if (!count || !buffer_holds(env, buffer, count * 8))
+    return 1.0f;
+  const uint16_t *px = (const uint16_t *)env->GetDirectBufferAddress(buffer);
+  return px ? measure_peak(px, count) : 1.0f;
+}
+
 /* -------------------------------------------------------------- tone map */
 
 /* Below [knee] nothing moves; above it a rational roll-off landing [peak]
@@ -340,7 +375,7 @@ static inline float shoulder_knee(float peak) {
 extern "C" JNIEXPORT void JNICALL
 Java_ca_mpreg_webgpuviewer_ImageUtil_toneMapToSdrNative(
     JNIEnv *env, jobject thiz, jobject src_buffer, jobject dst_buffer,
-    jint width, jint height) {
+    jint width, jint height, jfloat sourcePeak) {
   const size_t count = pixel_count(width, height, 8);
   if (!count)
     return;
@@ -357,16 +392,9 @@ Java_ca_mpreg_webgpuviewer_ImageUtil_toneMapToSdrNative(
   if (!src || !dst)
     return;
 
-  /* Non-finite skipped - see scaleHdrPeakNative. */
-  float peak = 1.0f;
-  for (size_t i = 0; i < count; ++i) {
-    const uint16_t *p = src + i * 4;
-    for (int c = 0; c < 3; ++c) {
-      const float v = srgb_decode(half_to_float(p[c]));
-      if (std::isfinite(v) && v > peak)
-        peak = v;
-    }
-  }
+  /* Given for an animation, so its frames share one curve instead of pumping.
+   */
+  const float peak = source_peak(sourcePeak, src, count);
 
   const float knee = shoulder_knee(peak);
 
@@ -572,11 +600,9 @@ Java_ca_mpreg_webgpuviewer_ImageUtil_applyGainmapNative(
  * compressed highlight. An image already under the target is untouched rather
  * than brightened to fill it. */
 extern "C" JNIEXPORT jfloat JNICALL
-Java_ca_mpreg_webgpuviewer_ImageUtil_scaleHdrPeakNative(JNIEnv *env,
-                                                        jobject thiz,
-                                                        jobject buffer,
-                                                        jint width, jint height,
-                                                        jfloat targetPeak) {
+Java_ca_mpreg_webgpuviewer_ImageUtil_scaleHdrPeakNative(
+    JNIEnv *env, jobject thiz, jobject buffer, jint width, jint height,
+    jfloat targetPeak, jfloat sourcePeak) {
   const size_t count = pixel_count(width, height, 8);
   if (!count)
     return 1.0f;
@@ -587,18 +613,8 @@ Java_ca_mpreg_webgpuviewer_ImageUtil_scaleHdrPeakNative(JNIEnv *env,
   if (!px)
     return 1.0f;
 
-  /* Non-finite samples are skipped rather than measured: one infinity in a
-   * corrupt float source would become the peak, and every real highlight would
-   * compress against it. */
-  float peak = 1.0f;
-  for (size_t i = 0; i < count; ++i) {
-    const uint16_t *q = px + i * 4;
-    for (int c = 0; c < 3; ++c) {
-      const float v = srgb_decode(half_to_float(q[c]));
-      if (std::isfinite(v) && v > peak)
-        peak = v;
-    }
-  }
+  /* Given, as for toneMapToSdrNative. */
+  const float peak = source_peak(sourcePeak, px, count);
 
   if (!std::isfinite(targetPeak) || !(targetPeak > 1.0f) || peak <= targetPeak)
     return peak;

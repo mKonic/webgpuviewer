@@ -550,10 +550,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 val texture = if (isPage1) texture1!! else texture2!!
                 val view = if (isPage1) view1!! else view2!!
                 val blitted = if (isPage1) blittedKeys1 else blittedKeys2
-                // Never a hit for an animated page - it swaps images every frame, so every call
-                // needs a fresh LoadOp.Clear + renderCacheSeed to blit whatever frame is current
-                // right now, rather than relying on frameVersion happening to have ticked.
-                val matches = !page.isAnimated && cacheHitLocked(page, isPage1)
+                // An animation's swap bumps frameVersion, so it misses like any other change.
+                val matches = cacheHitLocked(page, isPage1)
                 CacheReadResult(texture, view, matches, blitted)
             }
 

@@ -3,6 +3,8 @@ package ca.mpreg.webgpuviewer.renderer
 import android.graphics.Rect
 import android.util.Log
 import androidx.webgpu.BufferUsage
+import androidx.webgpu.ErrorFilter
+import androidx.webgpu.ErrorType
 import androidx.webgpu.GPUBindGroup
 import androidx.webgpu.GPUBindGroupDescriptor
 import androidx.webgpu.GPUBindGroupEntry
@@ -18,10 +20,15 @@ import androidx.webgpu.GPUTextureDescriptor
 import androidx.webgpu.GPUTextureView
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
 import java.nio.ByteBuffer
 import kotlin.math.ceil
 import kotlin.math.min
+import kotlin.time.Duration.Companion.milliseconds
 
 class Mipmap(
     val width: Int,
@@ -59,6 +66,9 @@ class Mipmap(
          * Suspends between chunks, so it must run outside the render mutex (see
          * [WebGpuRenderer.onDispatcher]) for the yields to be worth anything. The level is only
          * returned once every chunk has landed, so no caller can sample a half-filled texture.
+         *
+         * With [checkOom], a tile the driver cannot allocate throws [TextureOutOfMemory] instead of
+         * leaving an error texture behind - for oversized tiles a caller can retry smaller.
          */
         /**
          * Only the first [validRows] rows of [pixels] are copied; below them the textures keep
@@ -68,6 +78,7 @@ class Mipmap(
             pixels: ByteBuffer, width: Int, height: Int, scale: Float, tilesize: Int,
             format: Int = TextureFormat.RGBA8Unorm,
             validRows: Int = height,
+            checkOom: Boolean = false,
         ): Mipmap {
             val mipmap = Mipmap(
                 width = width,
@@ -79,7 +90,7 @@ class Mipmap(
                 format = format,
             )
             try {
-                mipmap.upload(pixels, validRows)
+                mipmap.upload(pixels, validRows, checkOom)
             } catch (e: Throwable) {
                 // Yielding makes the upload cancellable, so a half-built level can now exist.
                 // Free whatever landed before rethrowing - the caller never sees this instance
@@ -91,8 +102,10 @@ class Mipmap(
         }
     }
 
+    class TextureOutOfMemory(message: String) : Exception(message)
+
     /** Allocate the tile textures and copy [pixels] into them a chunk at a time. */
-    private suspend fun upload(pixels: ByteBuffer, validRows: Int) {
+    private suspend fun upload(pixels: ByteBuffer, validRows: Int, checkOom: Boolean) {
         // Only the rows that will be copied: a progressive upload's buffer may end at validRows.
         val need = min(validRows, height).toLong() * width * bytesPerPixel
         require(pixels.capacity() >= need) { "pixels hold ${pixels.capacity()} B, ${width}x$validRows needs $need" }
@@ -109,6 +122,7 @@ class Mipmap(
 
                 // Unyielded driver work - not on the back of the chunk just uploaded.
                 yield()
+                if (checkOom) device.pushErrorScope(ErrorFilter.OutOfMemory)
                 val texture = traced("wgv:mipTexture") {
                     device.createTexture(
                         GPUTextureDescriptor(
@@ -119,6 +133,9 @@ class Mipmap(
                     )
                 }
                 textures.add(texture)
+                if (checkOom && popErrorScopePumped() == ErrorType.OutOfMemory) {
+                    throw TextureOutOfMemory("${tileWidth}x$tileHeight tile")
+                }
                 textureViews.add(texture.createView())
 
                 val uploadHeight = (validRows - y).coerceIn(0, tileHeight)
@@ -204,6 +221,21 @@ class Mipmap(
             tileViews.add(view)
         }
         cachedQuad = Quad(tiles, tileViews, 0, 0)
+    }
+
+    /** popErrorScope only resolves while events are processed - pump them until it does. */
+    private suspend fun popErrorScopePumped(): Int = coroutineScope {
+        val pump = launch {
+            while (isActive) {
+                WebGpuRenderer.instance.processEvents()
+                delay(1.milliseconds)
+            }
+        }
+        try {
+            device.popErrorScope()
+        } finally {
+            pump.cancel()
+        }
     }
 
     internal fun cleanup() {

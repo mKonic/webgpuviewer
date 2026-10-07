@@ -1,5 +1,7 @@
 package ca.mpreg.webgpuviewer.viewer
 
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.Mutex
 import android.content.Context
 import android.os.SystemClock
 import android.util.Log
@@ -7,10 +9,13 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.util.fastCoerceIn
 import androidx.webgpu.GPUColor
 import androidx.webgpu.GPUCommandEncoder
@@ -45,16 +50,17 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
+import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
-import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * A page in the viewer, with shared transform (x, y, scale), pan/zoom-to-fit bounds, and
@@ -984,6 +990,173 @@ open class ImagePage {
     }
 
     /**
+     * A page whose pixels are a composition, authored in page pixels in a [width] x [height] box.
+     *
+     * Stays live while in reach of the screen (recomposes, animates, takes touch). Changed frames upload as
+     * this page's [Image], so transitions, spreads, the render cache and pan draw it like a decoded page.
+     * See [ComposePageHost].
+     *
+     * [size] is resolved against the viewer: viewport, spread side and scrolling decide it; rotation changes it.
+     */
+    open class Compose(
+        val size: ComposePageSize = ComposePageSize.Auto,
+        background: Int? = null,
+        private val content: (@Composable BoxScope.() -> Unit)? = null,
+    ) : ImageSingle(null) {
+
+        /**
+         * The page's content, centred in a [width] x [height] box.
+         *
+         * Override instead of passing a lambda when it reads the subclass's own state: a constructor argument
+         * can't close over a subclass not yet built.
+         */
+        @Composable
+        open fun BoxScope.Content() {
+            content?.invoke(this)
+        }
+
+        /** Resolved [size]; zero until the host measures it, so the page is skipped until then. */
+        @Volatile
+        private var footprint: IntSize = when (size) {
+            is ComposePageSize.Of -> IntSize(size.width, size.height)
+            ComposePageSize.Auto, ComposePageSize.Wrap -> IntSize.Zero
+        }
+
+        override val width: Int get() = footprint.width
+        override val height: Int get() = footprint.height
+
+        /** Set by the host once it has measured [size] against the viewport. */
+        internal fun resize(value: IntSize) {
+            footprint = value
+        }
+
+        /** What the viewer letterboxes and fades toward around a page smaller than the screen. */
+        override val backgroundColor: Int? = background
+
+        /** The content redraws whenever it recomposes, so a tile grid would only ever churn. */
+        override var highQuality: Boolean = false
+
+        init {
+            // Chrome is drawn at the size it asked for, so there is nothing to zoom into and
+            // nothing to fit: unpinned, a card smaller than the viewport is magnified to fill it.
+            minScale = 1f
+            maxScale = 1f
+            homeScale = 1f
+        }
+
+        /** Last frame captured off the live overlay; null before the first. */
+        @Volatile
+        private var snapshot: Image? = null
+
+        /**
+         * Whether the viewer draws [snapshot] instead of the live overlay compositing the content.
+         *
+         * In motion the overlay would be a second layer on its own clock, out of step with the pages and
+         * unwarpable by a transition shader, so motion uses the snapshot.
+         *
+         * Set by the host as motion starts and ends; stays on until the window has drawn the content once, since a
+         * straight swap leaves the page blank for a traversal. Both draw the same pixels, so overlap is invisible.
+         *
+         * Read from the render thread, written on the main one.
+         */
+        @Volatile
+        var presenting: Boolean = true
+            internal set
+
+        /** Whether there is a frame to hand over to, so the overlay knows it may step aside. */
+        internal val hasSnapshot: Boolean get() = snapshot != null
+
+        /**
+         * The snapshot, always, even while the window also carries this page: overlap is invisible, and swapping
+         * leaves a blank frame at each handover (window awaits a traversal, surface awaits a redraw).
+         *
+         * Never [ImageSingle]'s own image: an inherited [animate] would drive [currentFrameImage], which this ignores.
+         */
+        override val currentImage: Image? get() = snapshot
+
+        /**
+         * Bumped per landed capture. Separate from the snapshot's: a resize restarts that from zero, and a version
+         * going backwards could match a stale transition cache entry.
+         */
+        override val contentVersion: Int get() = captures.get()
+
+        private val captures = AtomicInteger()
+
+        /** One capture at a time, so two can never race to replace [snapshot]. */
+        private val captureLock = Mutex()
+
+        /**
+         * Decoded from the start so transitions don't skip this page. Before [capture] runs there's no texture,
+         * and the page draws [backgroundColor] alone.
+         */
+        override val isDecoded: Boolean get() = true
+
+        /**
+         * Takes [pixels] ([size] RGBA8 off the live overlay) as the image drawn while moving.
+         *
+         * Updates in place when the size matches; otherwise a new image, the old one freed on the render thread
+         * behind frames still sampling it. If cleaned up meanwhile, whatever this made is freed instead.
+         */
+        internal suspend fun capture(pixels: ByteBuffer, size: IntSize) = captureLock.withLock {
+            if (destroyed || size.width <= 0 || size.height <= 0) return@withLock
+            // Gone with the surface, it took every texture with it: an upload now would write
+            // into freed memory, which segfaults rather than throwing.
+            if (!WebGpuRenderer.isAvailable) return@withLock
+
+            val existing = snapshot
+            if (existing != null && existing.width == size.width && existing.height == size.height) {
+                // False once cleanup has freed it part way.
+                if (existing.update(pixels)) {
+                    captures.incrementAndGet()
+                    invalidate()
+                }
+                return@withLock
+            }
+
+            val image = Image(size.width, size.height)
+            try {
+                image.update(pixels)
+            } catch (e: Throwable) {
+                free(image)
+                throw e
+            }
+            backgroundColor?.let { image.backgroundColor = it }
+            // Against [cleanup], which swaps [snapshot] out under the same lock: exactly one side
+            // frees each image.
+            val kept = synchronized(this) {
+                if (destroyed) false else {
+                    snapshot = image
+                    true
+                }
+            }
+            if (!kept) {
+                free(image)
+                return@withLock
+            }
+            if (existing != null) free(existing)
+            captures.incrementAndGet()
+            invalidate()
+        }
+
+        @Synchronized
+        override fun cleanup() {
+            super.cleanup()
+            val image = snapshot ?: return
+            snapshot = null
+            free(image)
+        }
+
+        private companion object {
+            /** Frees run here so they queue behind the frames that might still be reading them. */
+            val releases = CoroutineScope(WebGpuRenderer.dispatcher + SupervisorJob())
+
+            fun free(image: Image) {
+                releases.launch { if (WebGpuRenderer.isAvailable) image.cleanup() }
+            }
+        }
+    }
+
+    /**
      * Two pages drawn side by side, sharing one pan/zoom transform and one
      * [ca.mpreg.webgpuviewer.renderer.TileRenderer] grid, so the seam bakes into whichever tile
      * straddles it instead of meeting two independently-snapped layers. Either side may be null,
@@ -1005,12 +1178,23 @@ open class ImagePage {
         private val rightSingle: ImageSingle?
             get() = right as? ImageSingle
 
-        // Grows the shorter side to the taller one's height
+        /** Grows the shorter image side to the taller one's height; see [counted] for a composed one. */
         private fun sideScale(side: ImagePage?): Float {
             val h = side?.height ?: return 1f
-            val tallest = max(left?.height ?: 0, right?.height ?: 0)
-            return if (h <= 0 || tallest <= h) 1f else tallest.toFloat() / h
+            if (h <= 0) return 1f
+            if (side is Compose) {
+                // Footprint is half the screen in screen pixels; undoing the image's fit lands it there.
+                val partner = (if (side === left) right else left)?.takeIf { it !is Compose }
+                    ?: return 1f
+                val fit = fitInHalf(partner)
+                return if (fit > 0f) 1f / fit else 1f
+            }
+            // Image heights only, so a composed side never makes its partner grow.
+            val tallestImage = max(imageHeight(left), imageHeight(right))
+            return if (tallestImage <= h) 1f else tallestImage.toFloat() / h
         }
+
+        private fun imageHeight(side: ImagePage?): Int = if (side == null || side is Compose) 0 else side.height
 
         private val leftScale: Float
             get() = sideScale(left)
@@ -1019,6 +1203,38 @@ open class ImagePage {
 
         private fun sideWidth(side: ImagePage?): Float =
             (side?.width ?: 0) * sideScale(side)
+
+        private val hasImageSide: Boolean
+            get() = (left != null && left !is Compose) || (right != null && right !is Compose)
+
+        /**
+         * Whether [side] takes part in this spread's layout. A composed side beside an image does not:
+         * the spread lays out, fits and pans by the image alone. Two composed sides both do.
+         */
+        private fun counted(side: ImagePage?): Boolean =
+            side != null && (side !is Compose || !hasImageSide)
+
+        private fun layoutWidth(side: ImagePage?): Float = if (counted(side)) sideWidth(side) else 0f
+
+        /**
+         * [side]'s x, y and scale as this spread draws it at [viewportWidth] ([forEachPlacedImage]'s arithmetic),
+         * or null if not a side of this one. [ComposePageHost] places a composed side's content by it.
+         */
+        internal fun sideTransform(side: ImagePage, viewportWidth: Float): FloatArray? {
+            val sideScale = when {
+                side === left -> leftScale
+                side === right -> rightScale
+                else -> return null
+            }
+            val seamOffset = (if (side === left) -0.5f else 0.5f) * side.width * sideScale
+            val offsetX = WebGpuRenderer.offsetX
+            val offsetY = WebGpuRenderer.offsetY
+            return floatArrayOf(
+                (x + seamOffset / viewportWidth + offsetX) / sideScale - offsetX,
+                (y + offsetY) / sideScale - offsetY,
+                scale * sideScale,
+            )
+        }
 
         /** Runs [action] for each present side, with its pixel offset from the seam. */
         private inline fun forEachSide(action: (side: ImagePage, offsetX: Float, scale: Float) -> Unit) {
@@ -1211,15 +1427,18 @@ open class ImagePage {
         }
 
         override fun horizontalExtent(): Pair<Float, Float> =
-            sideWidth(left) to sideWidth(right)
+            layoutWidth(left) to layoutWidth(right)
 
-        /** Total width (sum of both sides' widths) */
+        /** Sum of the [counted] sides' widths. */
         override val width: Int
-            get() = (sideWidth(left) + sideWidth(right)).roundToInt()
+            get() = (layoutWidth(left) + layoutWidth(right)).roundToInt()
 
-        /** Total height (max of both sides' heights) */
+        /** Max of the [counted] sides' heights. */
         override val height: Int
-            get() = max(left?.height ?: 0, right?.height ?: 0)
+            get() = max(
+                if (counted(left)) left!!.height * leftScale else 0f,
+                if (counted(right)) right!!.height * rightScale else 0f,
+            ).roundToInt()
 
         /**
          * Visible width after trim. Inner edges are ignored - a seam is never trimmed - and a
@@ -1227,9 +1446,9 @@ open class ImagePage {
          */
         override val trimWidth: Int
             get() {
-                val leftW =
+                val leftW = if (!counted(left)) 0 else
                     leftSingle?.image?.let { it.width - (it.trim?.left ?: 0) } ?: left?.width ?: 0
-                val rightW =
+                val rightW = if (!counted(right)) 0 else
                     rightSingle?.image?.let { it.trim?.right ?: it.width } ?: right?.width ?: 0
                 return (leftW * leftScale + rightW * rightScale).roundToInt()
             }
@@ -1237,7 +1456,8 @@ open class ImagePage {
         /** Visible height after trim (max of trim heights) */
         override val trimHeight: Int
             get() = max(
-                (left?.trimHeight ?: 0) * leftScale, (right?.trimHeight ?: 0) * rightScale
+                if (counted(left)) left!!.trimHeight * leftScale else 0f,
+                if (counted(right)) right!!.trimHeight * rightScale else 0f,
             ).roundToInt()
 
         override val isHalfWidth: Boolean
@@ -1272,14 +1492,21 @@ open class ImagePage {
         }
 
         /**
-         * Each side fit to its own half independently, since the two can differ in size - unlike
-         * [ImagePage]'s default, which fits [width]/[height]'s combined span.
+         * Each [counted] side fit to its own half independently, since the two can differ in size -
+         * unlike [ImagePage]'s default, which fits [width]/[height]'s combined span.
          */
         override fun halfWidthScale(halfWidth: Float, parentHeight: Float): Float =
-            listOfNotNull(left, right).filter { it.width > 0 && it.height > 0 }
-                .minOfOrNull { side ->
-                    minOf(halfWidth / side.width, parentHeight / side.height)
-                }?.coerceAtLeast(0.01f) ?: 0.01f
+            // Composed sides alone are half-screen in screen pixels: 1:1, known before they have a size.
+            if (!hasImageSide) 1f else
+            listOfNotNull(left, right).filter { counted(it) && it.width > 0 && it.height > 0 }
+                .minOfOrNull { side -> minOf(halfWidth / side.width, parentHeight / side.height) }
+                ?.coerceAtLeast(0.01f) ?: 0.01f
+
+        /** [side]'s fit in half the viewport, as [halfWidthScale] takes it; 0 before a size. */
+        private fun fitInHalf(side: ImagePage): Float {
+            if (side.width <= 0 || side.height <= 0 || parentWidth <= 0f || parentHeight <= 0f) return 0f
+            return minOf(parentWidth / 2f / side.width, parentHeight / side.height)
+        }
     }
 
     companion object {
@@ -1634,10 +1861,10 @@ open class ImagePage {
         if (isOnScreen) onInvalidate?.invoke()
     }
 
-    private val parentWidth: Float
+    protected val parentWidth: Float
         get() = parent?.width?.toFloat() ?: 0f
 
-    private val parentHeight: Float
+    protected val parentHeight: Float
         get() = parent?.viewportHeight ?: 0f
 
     /**
@@ -1916,4 +2143,32 @@ open class ImagePage {
 
     /** Alias for cleanup() */
     fun destroy() = cleanup()
+}
+
+/**
+ * How an [ImagePage.Compose] page's footprint is decided. [ComposePageHost] re-resolves it as the viewer
+ * changes, so rotation or dual-page needs no rebuild.
+ */
+sealed interface ComposePageSize {
+
+    /**
+     * The whole slot where the viewer scrolls, the content's own size where it pages.
+     *
+     * A continuous viewer fits pages to viewport width, so self-sized content would be scaled up. Paged, a
+     * smaller page is cheaper to capture and not draggable ([ImagePage.minY]/[ImagePage.maxY] collapse).
+     */
+    data object Auto : ComposePageSize
+
+    /**
+     * Full width and the content's own height where the viewer scrolls, the content's own size where it pages.
+     *
+     * For chrome between pages, e.g. a chapter transition. Full width for the same reason as [Auto].
+     */
+    data object Wrap : ComposePageSize
+
+    /**
+     * Exactly this many page pixels, for chrome standing in for a page of known size (a spinner while decoding)
+     * so layout doesn't shift when the image arrives.
+     */
+    data class Of(val width: Int, val height: Int) : ComposePageSize
 }

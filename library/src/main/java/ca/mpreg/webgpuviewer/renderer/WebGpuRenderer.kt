@@ -203,7 +203,8 @@ class WebGpuRenderer {
                                 val first = !deviceLost
                                 if (first) {
                                     deviceLostDetail = " (reason=$reason: $message" +
-                                            (lastUncapturedError?.let { "; last error: $it" } ?: "") + ")"
+                                            (lastUncapturedError?.let { "; last error: $it" }
+                                                ?: "") + ")"
                                 }
                                 deviceLost = true
                                 Log.e(

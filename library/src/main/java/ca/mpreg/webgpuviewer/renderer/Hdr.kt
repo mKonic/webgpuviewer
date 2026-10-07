@@ -1,6 +1,5 @@
 package ca.mpreg.webgpuviewer.renderer
 
-import android.app.Activity
 import android.content.Context
 import android.content.pm.ActivityInfo
 import android.hardware.DataSpace
@@ -15,6 +14,7 @@ import androidx.annotation.RequiresApi
 import androidx.webgpu.GPUAdapter
 import androidx.webgpu.GPUSurface
 import androidx.webgpu.TextureFormat
+import ca.mpreg.webgpuviewer.findActivity
 import ca.mpreg.webgpuviewer.renderer.Hdr.MAX_HEADROOM_RATIO
 import ca.mpreg.webgpuviewer.renderer.Hdr.RESOLVE_TIMEOUT_MS
 import ca.mpreg.webgpuviewer.renderer.Hdr.applyExtendedRange
@@ -38,7 +38,6 @@ import ca.mpreg.webgpuviewer.renderer.Hdr.resetContent
 import ca.mpreg.webgpuviewer.renderer.Hdr.retainHdrImage
 import ca.mpreg.webgpuviewer.renderer.Hdr.supportedByDevice
 import ca.mpreg.webgpuviewer.renderer.Hdr.syncColorMode
-import ca.mpreg.webgpuviewer.findActivity
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
 import java.lang.ref.WeakReference

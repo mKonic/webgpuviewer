@@ -11,6 +11,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -63,6 +64,8 @@ fun ImageViewerContinuous(
     }
 
     RequestMaxRefreshRate()
+
+    HdrColorModeHost()
 
     val surfaceModifier = modifier
         .fillMaxSize()
@@ -484,20 +487,24 @@ fun ImageViewerContinuous(
             }
         }
 
-    ViewerSurface(surfaceModifier) { surface, width, height ->
-        try {
-            // Before init: the panel's HDR support gates the decode path, which can reach
-            // an image before the first frame.
-            attachHdrDisplay(view)
-            state.init(scope, surface, width, height)
-            surface.onChanged { w, h -> state.resize(w, h) }
-            // After init, so Hdr.resolve has run and the surface's capability is known.
-            attachHdrSurface(view)
-            state.invalidate()
-            state.collect()
-        } finally {
-            attachHdrSurface(null)
-            state.cleanup()
+    Box {
+        ViewerSurface(surfaceModifier) { surface, width, height ->
+            try {
+                // Before init: the panel's HDR support gates the decode path, which can reach
+                // an image before the first frame.
+                attachHdrDisplay(view)
+                state.init(scope, surface, width, height)
+                surface.onChanged { w, h -> state.resize(w, h) }
+                // After init, so Hdr.resolve has run and the surface's capability is known.
+                attachHdrSurface(view)
+                state.invalidate()
+                state.collect()
+            } finally {
+                attachHdrSurface(null)
+                state.cleanup()
+            }
         }
+
+        ComposePageHostView(state, Modifier.matchParentSize())
     }
 }

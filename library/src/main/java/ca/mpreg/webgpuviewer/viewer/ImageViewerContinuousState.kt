@@ -20,6 +20,7 @@ import ca.mpreg.webgpuviewer.viewer.ImageViewerContinuousState.Companion.MAX_VIS
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlin.math.max
+import kotlin.math.round
 
 class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
     companion object {
@@ -277,7 +278,8 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             while (guard++ < MAX_PAGE_WALK) {
                 val page = getPage(0) ?: return
                 val pageHeight = getPageSlotHeight(page)
-                if (scrollYInternal <= pageHeight || pageHeight <= 0f) break
+                // Unsized (composed, pre-measure): stepped past once the scroll is beyond its top.
+                if (scrollYInternal <= pageHeight) break
                 if (getPage(1) == null) {
                     scrollYInternal = pageHeight.toDouble()
                     break
@@ -662,12 +664,12 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             visible.add(page)
             // Walked upward, so each goes in front of the last - top to bottom, as the
             // forward walk appends.
-            if (page.isDecoded) {
+            if (page.isDecoded && contentHeight > 0f) {
                 pages.add(
                     0, VisiblePage(page, docTopBack, pageHeight, contentHeight, cropFor(page))
                 )
             }
-            if (pageHeight <= 0f) break
+            // Unsized (composed, pre-measure): skip rather than end the walk, or every later page vanishes.
             iBack--
         }
 
@@ -695,14 +697,12 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
 
             if (y + pageHeight > visTop) {
                 visible.add(page)
-                if (page.isDecoded) {
+                if (page.isDecoded && contentHeight > 0f) {
                     pages.add(VisiblePage(page, docTop, pageHeight, contentHeight, cropFor(page)))
                 }
             }
 
-            // A zero-height page never advances y, so stop.
-            if (pageHeight <= 0f) break
-
+            // Zero height advances nothing and the walk is bounded by MAX_VISIBLE_PAGES: step past, don't stop.
             prevHeight = pageHeight
             y += pageHeight
             i++
@@ -720,6 +720,62 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
             pages, scale, offsetX, cameraDocY, isScaleAnimating || isFlinging, backgroundColor,
             scrolledThrough
         )
+    }
+
+    /**
+     * [page]'s live top-left in screen pixels and screen pixels per page pixel; null beyond
+     * [MAX_VISIBLE_PAGES] below page 0.
+     *
+     * [renderSnapshot]'s arithmetic for an uncropped [ImagePage.ImageSingle], against the live position:
+     * [ComposePageHost] draws over the surface's snapshot, so both must hit the same pixels, and a captured
+     * frame lags the scroll.
+     */
+    internal fun screenPlacement(page: ImagePage): PagePlacement? = synchronized(scrollLock) {
+        if (page.width <= 0 || width <= 0 || height <= 0) return null
+        val docTop = docTopOf(page) ?: return null
+
+        val screenW = width.toFloat()
+        val screenH = height.toFloat()
+        val s = safeScale
+        // As captureLocked and renderSnapshot have them, term for term.
+        val y0 = (-scrollYInternal + slideOffset).toFloat()
+        val cameraDocY = anchorDocY - y0 + 0.5f * screenH / s
+        val anchorX = screenW / 2f + s * (offsetX * screenW + WebGpuRenderer.offsetX * screenW)
+        val anchorY = screenH / 2f - s * cameraDocY + s * WebGpuRenderer.offsetY * screenH
+
+        PagePlacement(
+            left = composeLeft(anchorX, s, screenW),
+            top = composeTop(anchorY, s, docTop),
+            scale = s * screenW / page.width,
+        )
+    }
+
+    /*
+     * An [ImagePage.Compose] page's top-left, snapped to whole pixels as the window snaps its own draw;
+     * otherwise the snapshot sits up to half a pixel off, and softer, while both show. Paged placements
+     * are already whole.
+     */
+    private fun composeLeft(anchorX: Float, scale: Float, screenW: Float) =
+        round(anchorX - scale * screenW / 2f)
+
+    private fun composeTop(anchorY: Float, scale: Float, docTop: Float) =
+        round(anchorY + scale * docTop)
+
+    /**
+     * [page]'s slot top in document space, walked off [anchorDocY] as [captureLocked] does.
+     *
+     * Downward only: a page above page 0 is on screen only while [animateSlideIn] slides it, and nothing places
+     * a sliding page.
+     */
+    private fun docTopOf(page: ImagePage): Float? {
+        var docTop = anchorDocY
+        for (i in 0..MAX_VISIBLE_PAGES) {
+            val candidate = getPage(i) ?: return null
+            if (candidate === page) return docTop
+            // An unsized page adds nothing, as in the render walk.
+            docTop += getPageSlotHeight(candidate)
+        }
+        return null
     }
 
     override suspend fun renderSnapshot(
@@ -784,14 +840,40 @@ class ImageViewerContinuousState : ImageViewerState(isVertical = true) {
                                 shiftX + pageScale * (srcOffsetX + sideScale * image.x)
                             val docCenterY = vp.docTop + 0.5f * vp.contentHeight + shiftY +
                                     pageScale * sideScale * image.y
-                            val targetX = anchorX + s.scale * docCenterX
-                            val targetY = anchorY + s.scale * docCenterY
+                            // A composed page lands where the window draws it - see [composeLeft].
+                            val compose = page is ImagePage.Compose
+                            val targetX = if (compose) {
+                                composeLeft(
+                                    anchorX,
+                                    s.scale,
+                                    dstW
+                                ) + 0.5f * imageScale * image.width
+                            } else {
+                                anchorX + s.scale * docCenterX
+                            }
+                            val targetY = if (compose) {
+                                composeTop(
+                                    anchorY,
+                                    s.scale,
+                                    vp.docTop
+                                ) + 0.5f * imageScale * image.height
+                            } else {
+                                anchorY + s.scale * docCenterY
+                            }
                             val (x, y) = solveImagePlacement(
                                 targetX, targetY, imageScale, image, dstW, dstH
                             )
                             RenderPage.renderFast(
                                 pass, image, texture, x, y, imageScale,
-                                src = crop?.let { cropInImage(it, page, image, srcOffsetX, sideScale) },
+                                src = crop?.let {
+                                    cropInImage(
+                                        it,
+                                        page,
+                                        image,
+                                        srcOffsetX,
+                                        sideScale
+                                    )
+                                },
                             )
                         }
                     }

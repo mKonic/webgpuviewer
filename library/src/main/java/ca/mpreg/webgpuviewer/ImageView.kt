@@ -10,6 +10,7 @@ import ca.mpreg.webgpuviewer.renderer.Thermals
 import ca.mpreg.webgpuviewer.viewer.ImageViewer
 import ca.mpreg.webgpuviewer.viewer.ImageViewerState
 
+/** [ImageViewer] as a View. The composable registers the HDR colour mode itself. */
 open class ImageView(
     context: Context,
     attrs: AttributeSet? = null,
@@ -29,16 +30,12 @@ open class ImageView(
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        // Registered, not requested: [Hdr] sets the colour mode with the first HDR image and
-        // drops it with the last. Held all session, it ramps panel brightness on SDR reading.
-        Hdr.attachColorModeHost(this)
         Thermals.attachHost(this)
         DeviceMemory.attachHost(this)
     }
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
-        Hdr.detachColorModeHost(this)
         Thermals.attachHost(null)
         DeviceMemory.attachHost(null)
     }

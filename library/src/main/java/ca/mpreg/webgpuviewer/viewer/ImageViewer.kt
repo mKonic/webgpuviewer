@@ -10,10 +10,12 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
@@ -30,14 +32,16 @@ import androidx.compose.ui.input.pointer.util.addPointerInputChange
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
-import androidx.window.layout.FoldingFeature
-import androidx.window.layout.WindowInfoTracker
-import ca.mpreg.webgpuviewer.findActivity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.util.fastCoerceIn
 import androidx.compose.ui.util.fastForEach
+import androidx.window.layout.FoldingFeature
+import androidx.window.layout.WindowInfoTracker
 import ca.mpreg.webgpuviewer.NormalMotionDurationScale
 import ca.mpreg.webgpuviewer.RequestMaxRefreshRate
+import ca.mpreg.webgpuviewer.findActivity
 import ca.mpreg.webgpuviewer.orZero
+import ca.mpreg.webgpuviewer.renderer.Hdr
 import ca.mpreg.webgpuviewer.waitForCleanUp
 import ca.mpreg.webgpuviewer.waitForDown
 import ca.mpreg.webgpuviewer.waitForRelease
@@ -91,6 +95,8 @@ fun ImageViewer(
     }
 
     RequestMaxRefreshRate()
+
+    HdrColorModeHost()
 
     // SurfaceView or TextureView depending on whether HDR is reachable - see [ViewerSurface],
     // which also carries the mihonapp/mihon#3773 history behind that choice.
@@ -560,21 +566,46 @@ fun ImageViewer(
             }
         }
 
-    ViewerSurface(surfaceModifier) { surface, width, height ->
-        try {
-            // Before init: whether the panel does HDR at all gates the decode path, which can
-            // reach an image before the first frame is drawn.
-            attachHdrDisplay(view)
-            state.init(scope, surface, width, height)
-            surface.onChanged { w, h -> state.resize(w, h) }
-            // After init, so Hdr.resolve has run and the surface's capability is known too.
-            attachHdrSurface(view)
-            state.invalidate()
-            state.collect()
-        } finally {
-            attachHdrSurface(null)
-            state.cleanup()
+    Box {
+        ViewerSurface(surfaceModifier) { surface, width, height ->
+            try {
+                // Before init: whether the panel does HDR at all gates the decode path, which can
+                // reach an image before the first frame is drawn.
+                attachHdrDisplay(view)
+                state.init(scope, surface, width, height)
+                surface.onChanged { w, h -> state.resize(w, h) }
+                // After init, so Hdr.resolve has run and the surface's capability is known too.
+                attachHdrSurface(view)
+                state.invalidate()
+                state.collect()
+            } finally {
+                attachHdrSurface(null)
+                state.cleanup()
+            }
         }
+
+        ComposePageHostView(state, Modifier.matchParentSize())
+    }
+}
+
+/**
+ * Holds the window's HDR colour mode while this viewer is composed, and restores it on window refocus.
+ *
+ * [Hdr] otherwise ties the mode to the first/last HDR image; held all session it would ramp panel brightness
+ * on SDR reading. While unfocused, the system silently drops the colour mode and the surface's extended range.
+ */
+@Composable
+internal fun HdrColorModeHost() {
+    val view = LocalView.current
+    val focused = LocalWindowInfo.current.isWindowFocused
+
+    DisposableEffect(view) {
+        Hdr.attachColorModeHost(view)
+        onDispose { Hdr.detachColorModeHost(view) }
+    }
+
+    LaunchedEffect(focused) {
+        if (focused) Hdr.resyncPresentation()
     }
 }
 

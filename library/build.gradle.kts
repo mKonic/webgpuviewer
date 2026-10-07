@@ -74,6 +74,9 @@ dependencies {
     implementation(libs.androidx.core)
     implementation(libs.androidx.window)
     implementation(libs.androidx.compose.foundation)
+    // ComposePageHost installs the view-tree owners its off-window children need.
+    implementation(libs.androidx.lifecycle.viewmodel)
+    implementation(libs.androidx.savedstate)
 
     embed(libs.androidx.webgpu)
     testImplementation("junit:junit:4.13.2")

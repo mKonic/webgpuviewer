@@ -161,6 +161,7 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
 
             if (pageDelta != 0) {
                 onPageChange?.runCatching { invoke(if (isReversed) -pageDelta else pageDelta) }
+                onReachChanged?.invoke()
             }
 
             // Rotate rather than invalidate: onPageChange already moved what backs getPage, so a
@@ -184,6 +185,8 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
         // cancel() doesn't wait: a turn started while the last one unwinds would otherwise have
         // its own transitionFromPage - set just before this call - cleared by that finally.
         val id = ++turn
+        // A far jump lands on pages nothing has had in reach yet.
+        onReachChanged?.invoke()
         animationJob = scope?.launch {
             setPageOffsetDirect(direction.toFloat())
             invalidate()
@@ -237,6 +240,12 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
     /** How a touch [onPress] claimed ended, where the finger was then, and whether it was a click. */
     var onPressEnd: ((position: Offset, clicked: Boolean) -> Unit)? = null
 
+    /**
+     * Called on any thread when pages around the current one may have changed: turn, far jump, page on screen.
+     * Else [ComposePageHost] only notices on its idle poll, late enough for a turn to land uncaptured.
+     */
+    internal var onReachChanged: (() -> Unit)? = null
+
     /** Override for the "from" page during far navigation animation */
     var transitionFromPage: ImagePage? = null
 
@@ -261,7 +270,14 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
             val was = field
             field = value
             // After the assignment, so a page woken by it finds itself on screen.
-            for (page in value) if (page !in was) page.cameOnScreen()
+            var arrived = false
+            for (page in value) {
+                if (page !in was) {
+                    page.cameOnScreen()
+                    arrived = true
+                }
+            }
+            if (arrived) onReachChanged?.invoke()
         }
 
     /**
@@ -315,6 +331,32 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
     }
 
     /**
+     * Composed current page the window draws over the whole viewport, set by [ComposePageHost]. Surface
+     * frames are skipped meanwhile, else a pan or zoom draws twice. Cleared before the page moves on its
+     * own, which redraws the surface.
+     */
+    @Volatile
+    internal var coveredBy: ImagePage.Compose? = null
+        set(value) {
+            if (field === value) return
+            val was = field
+            field = value
+            if (was != null && value == null) invalidate()
+        }
+
+    /** Whether [coveredBy] still hides everything this state would draw. */
+    private fun windowCovers(): Boolean {
+        val page = coveredBy ?: return false
+        if (page.destroyed || page !== getPage(0)) {
+            // For good: coming back, the page waits for the host to draw it first and say so.
+            // No invalidate needed - this frame draws.
+            coveredBy = null
+            return false
+        }
+        return pageOffset == 0f
+    }
+
+    /**
      * Draw at most one frame per display frame, for as long as anything is [dirty].
      *
      * A frame loop, not a pass per invalidate: a fling step, a fade step, a decode and the tile
@@ -340,6 +382,8 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
             }
             // Drop the wake this frame's invalidate left, or going idle costs a spurious one.
             renderWake.tryReceive()
+            // Hidden under the window. Uncovering invalidates, so the surface catches up then.
+            if (windowCovers()) continue
             // Captured here, drawn on the GPU thread below - see this function's doc.
             val snapshot = traced("wgv:capture") { captureRenderState() } ?: continue
             drawing = launch(dispatcher) {

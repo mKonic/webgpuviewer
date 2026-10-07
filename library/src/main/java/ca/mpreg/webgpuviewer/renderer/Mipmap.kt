@@ -316,9 +316,10 @@ class Mipmap(
     constructor(width: Int, height: Int) : this(
         width, height, 1f, 1, 1, 4096, TextureFormat.RGBA8Unorm
     ) {
+        // Wide enough for [update]'s copies, which round up to [COPY_ALIGNMENT] texels.
         val texture = device.createTexture(
             GPUTextureDescriptor(
-                size = GPUExtent3D(width, height),
+                size = GPUExtent3D(alignedWidth(width), height),
                 format = format,
                 usage = TextureUsage.TextureBinding or TextureUsage.CopyDst or TextureUsage.RenderAttachment or TextureUsage.StorageBinding,
             )

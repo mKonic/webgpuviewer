@@ -332,6 +332,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Cache validity tracking
         private var cachedPage1: ImagePage? = null
         private var cachedPage2: ImagePage? = null
+
+        // The viewer each slot was drawn for. A page's [ImagePage.parent] can be another viewer's,
+        // or none for a page that never joined one, so [releasePagesOf] matches on this as well.
+        private var cachedTiles1: TileRenderer? = null
+        private var cachedTiles2: TileRenderer? = null
         private var cachedX1 = 0f
         private var cachedY1 = 0f
         private var cachedScale1 = 0f
@@ -403,7 +408,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 // Invalidate cache
                 cacheGeneration++
                 cachedPage1 = null
+                cachedTiles1 = null
                 cachedPage2 = null
+                cachedTiles2 = null
                 blittedKeys1 = emptySet()
                 blittedKeys2 = emptySet()
                 cacheWidth = width
@@ -443,7 +450,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             synchronized(cacheLock) {
                 cacheGeneration++
                 cachedPage1 = null
+                cachedTiles1 = null
                 cachedPage2 = null
+                cachedTiles2 = null
                 blittedKeys1 = emptySet()
                 blittedKeys2 = emptySet()
             }
@@ -457,12 +466,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         internal fun releasePagesOf(state: ImageViewerState) {
             synchronized(cacheLock) {
                 cacheGeneration++
-                if (cachedPage1?.parent === state) {
+                if (cachedPage1?.parent === state || cachedTiles1 === state.tiles) {
                     cachedPage1 = null
+                    cachedTiles1 = null
                     blittedKeys1 = emptySet()
                 }
-                if (cachedPage2?.parent === state) {
+                if (cachedPage2?.parent === state || cachedTiles2 === state.tiles) {
                     cachedPage2 = null
+                    cachedTiles2 = null
                     blittedKeys2 = emptySet()
                 }
             }
@@ -480,6 +491,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 when {
                     cacheHitLocked(newCurrentPage, true) -> {
                         cachedPage2 = null
+                        cachedTiles2 = null
                         blittedKeys2 = emptySet()
                     }
 
@@ -487,18 +499,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                         val t = texture1; texture1 = texture2; texture2 = t
                         val v = view1; view1 = view2; view2 = v
                         cachedPage1 = cachedPage2
+                        cachedTiles1 = cachedTiles2
                         cachedX1 = cachedX2
                         cachedY1 = cachedY2
                         cachedScale1 = cachedScale2
                         cachedFrameVersion1 = cachedFrameVersion2
                         blittedKeys1 = blittedKeys2
                         cachedPage2 = null
+                        cachedTiles2 = null
                         blittedKeys2 = emptySet()
                     }
 
                     else -> {
                         cachedPage1 = null
+                        cachedTiles1 = null
                         cachedPage2 = null
+                        cachedTiles2 = null
                         blittedKeys1 = emptySet()
                         blittedKeys2 = emptySet()
                     }
@@ -585,12 +601,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     // identity's metadata is already correct.
                     if (isPage1) {
                         cachedPage1 = page
+                        cachedTiles1 = tiles
                         cachedX1 = pageX
                         cachedY1 = pageY
                         cachedScale1 = pageScale
                         cachedFrameVersion1 = pageFrameVersion
                     } else {
                         cachedPage2 = page
+                        cachedTiles2 = tiles
                         cachedX2 = pageX
                         cachedY2 = pageY
                         cachedScale2 = pageScale

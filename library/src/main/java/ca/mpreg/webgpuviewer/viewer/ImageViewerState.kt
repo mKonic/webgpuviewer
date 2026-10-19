@@ -119,6 +119,10 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
      */
     var doubleTapZoomEnabled: Boolean = true
 
+    /** Off, a tap fires on lift instead of after the double tap timeout; no double tap or its drag. */
+    @Volatile
+    var doubleTapGesturesEnabled: Boolean = true
+
     /** Whether two fingers scale the page. Off leaves the page at whatever scale it is on. */
     var pinchZoomEnabled: Boolean = true
 

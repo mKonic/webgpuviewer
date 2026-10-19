@@ -164,7 +164,8 @@ fun ImageViewer(
                     longPressJob?.cancel()
                     // A stop settles below and fires no tap, but still waits out the double
                     // tap window: it can be the first of a pair.
-                    val secondDown = waitForDown(doubleTapTimeout)
+                    val secondDown =
+                        if (state.doubleTapGesturesEnabled) waitForDown(doubleTapTimeout) else null
                     if (secondDown == null) {
                         pageTurnJob?.cancel()
                         if (state.pageOffset != 0f) {

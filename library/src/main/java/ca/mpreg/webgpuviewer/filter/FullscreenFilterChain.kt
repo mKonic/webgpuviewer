@@ -27,7 +27,7 @@ import ca.mpreg.webgpuviewer.renderer.destroyAndRelease
  * Textures are pooled and recycled within the frame, so a chain of any length runs on two
  * screen-sized textures rather than one per filter.
  */
-class FilterChain {
+class FullscreenFilterChain {
     private val device get() = WebGpuRenderer.device
 
     /** Set by the viewer - a filter's settings change has to reach the screen somehow. */
@@ -289,7 +289,7 @@ class FilterChain {
      * repeating them; it is never in [filters], and runs only when [endFrame] asks it to.
      */
     private val tailBlit = object : FilterFullscreen() {
-        override val label get() = "FilterChain blit"
+        override val label get() = "FullscreenFilterChain blit"
         override val code get() = BLIT_FS
         override fun entries(src: GPUTextureView) = arrayOf(
             GPUBindGroupEntry(0, textureView = src),

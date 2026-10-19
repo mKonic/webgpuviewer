@@ -20,6 +20,8 @@ import androidx.webgpu.GPUTextureDescriptor
 import androidx.webgpu.GPUTextureView
 import androidx.webgpu.TextureFormat
 import androidx.webgpu.TextureUsage
+import ca.mpreg.webgpuviewer.renderer.Mipmap.Companion.COPY_ALIGNMENT
+import ca.mpreg.webgpuviewer.renderer.Mipmap.Companion.writable
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -106,9 +108,117 @@ class Mipmap(
             }
             return mipmap
         }
+
+        /**
+         * An empty level filled by rendering into [target]. A tile binds a 1x1 placeholder until
+         * [allocate], then holds undefined pixels until written, so nothing may read an unwritten part.
+         */
+        fun writable(width: Int, height: Int, scale: Float, tilesize: Int, format: Int): Mipmap {
+            val mipmap = Mipmap(
+                width = width,
+                height = height,
+                scale = scale,
+                tilesCols = ceil(width.toFloat() / tilesize).toInt(),
+                tilesRows = ceil(height.toFloat() / tilesize).toInt(),
+                tilesize = tilesize,
+                format = format,
+            )
+            val count = mipmap.tilesCols * mipmap.tilesRows
+            val placeholder = placeholder()
+            mipmap.allocated = BooleanArray(count)
+            repeat(count) {
+                mipmap.textures.add(placeholder.first)
+                mipmap.textureViews.add(placeholder.second)
+            }
+            mipmap.buildQuadSlots()
+            return mipmap
+        }
+
+        private var placeholderTexture: Pair<GPUTexture, GPUTextureView>? = null
+
+        private fun placeholder(): Pair<GPUTexture, GPUTextureView> = placeholderTexture ?: run {
+            val texture = device.createTexture(
+                GPUTextureDescriptor(
+                    label = "mipmap placeholder",
+                    size = GPUExtent3D(1, 1),
+                    format = TextureFormat.RGBA8Unorm,
+                    usage = TextureUsage.TextureBinding,
+                )
+            )
+            (texture to texture.createView()).also { placeholderTexture = it }
+        }
     }
 
     class TextureOutOfMemory(message: String) : Exception(message)
+
+    /** Per tile, whether it has its own texture; null unless [writable]. */
+    private var allocated: BooleanArray? = null
+
+    /** Tile [column], [row]'s bytes, row padding included. */
+    fun tileBytes(column: Int, row: Int): Long {
+        val w = min((column + 1) * tilesize, width) - column * tilesize
+        val h = min((row + 1) * tilesize, height) - row * tilesize
+        return alignedWidth(w).toLong() * h * bytesPerPixel
+    }
+
+    fun isAllocated(column: Int, row: Int): Boolean =
+        allocated?.get(row * tilesCols + column) ?: true
+
+    /**
+     * Give a [writable] level's tile its texture. [onOutOfMemory] runs later, on the render thread,
+     * if the device could not allocate it.
+     */
+    fun allocate(column: Int, row: Int, onOutOfMemory: () -> Unit) {
+        val i = row * tilesCols + column
+        val flags = allocated ?: return
+        if (flags[i]) return
+        val w = min((column + 1) * tilesize, width) - column * tilesize
+        val h = min((row + 1) * tilesize, height) - row * tilesize
+        device.pushErrorScope(ErrorFilter.OutOfMemory)
+        val texture = device.createTexture(
+            GPUTextureDescriptor(
+                size = GPUExtent3D(alignedWidth(w), h),
+                format = format,
+                usage = TextureUsage.TextureBinding or TextureUsage.CopyDst or TextureUsage.RenderAttachment,
+            )
+        )
+        ErrorScopes.pop(device) { onOutOfMemory() }
+        textures[i] = texture
+        textureViews[i] = texture.createView()
+        flags[i] = true
+        rebuildQuads()
+    }
+
+    /** Return a [writable] level's tile to its placeholder. */
+    fun release(column: Int, row: Int) {
+        val i = row * tilesCols + column
+        val flags = allocated ?: return
+        if (!flags[i]) return
+        // Destroyed after the queue's work with it completes.
+        textureViews[i].close()
+        textures[i].destroyAndRelease()
+        val placeholder = placeholder()
+        textures[i] = placeholder.first
+        textureViews[i] = placeholder.second
+        flags[i] = false
+        rebuildQuads()
+    }
+
+    private fun rebuildQuads() {
+        tiles.clear()
+        tileViews.clear()
+        cachedQuad = null
+        lastQuad = null
+        lastQuadTX = -1
+        lastQuadTY = -1
+        buildQuadSlots()
+    }
+
+    /** To render into - see [writable]. */
+    fun target(column: Int, row: Int): Pair<GPUTexture, GPUTextureView> {
+        val i = row * tilesCols + column
+        return textures[i] to textureViews[i]
+    }
 
     /** Allocate the tile textures and copy [pixels] into them a chunk at a time. */
     private suspend fun upload(pixels: ByteBuffer, validRows: Int, checkOom: Boolean) {
@@ -159,6 +269,14 @@ class Mipmap(
             }
         }
 
+        buildQuadSlots()
+    }
+
+    /**
+     * Seed the fixed 2x2 window, cached outright when the level fits in one: such a grid has only
+     * one possible window.
+     */
+    private fun buildQuadSlots() {
         for (r in 0 until 2) {
             val row = r.coerceAtMost(tilesRows - 1) * tilesCols
             for (c in 0 until 2) {
@@ -244,12 +362,15 @@ class Mipmap(
         tileBindGroups.clear()
         tileUniforms?.forEach { it?.destroyAndRelease() }
         tileUniforms = null
-        textureViews.forEach { view -> view.close() }
+        // Not the placeholder a [writable] level's empty tiles share.
+        val flags = allocated
+        textureViews.forEachIndexed { i, view -> if (flags == null || flags[i]) view.close() }
         textureViews.clear()
         tileViews.clear()
-        textures.forEach { tex -> tex.destroyAndRelease() }
+        textures.forEachIndexed { i, tex -> if (flags == null || flags[i]) tex.destroyAndRelease() }
         textures.clear()
         tiles.clear()
+        allocated = null
     }
 
     /**
@@ -339,13 +460,17 @@ class Mipmap(
                 repeat((end - real) * bytesPerPixel) { data.put(0) }
             }
             data.flip()
-            layout = GPUTexelCopyBufferLayout(offset = 0, bytesPerRow = spanBytes, rowsPerImage = rows)
+            layout =
+                GPUTexelCopyBufferLayout(offset = 0, bytesPerRow = spanBytes, rowsPerImage = rows)
         }
 
         device.queue.writeTexture(
             dataLayout = layout,
             data = data,
-            destination = GPUTexelCopyTextureInfo(texture = texture, origin = GPUOrigin3D(x = start, y = dstY)),
+            destination = GPUTexelCopyTextureInfo(
+                texture = texture,
+                origin = GPUOrigin3D(x = start, y = dstY)
+            ),
             writeSize = GPUExtent3D(end - start, rows),
         )
     }

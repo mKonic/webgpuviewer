@@ -17,7 +17,7 @@ import ca.mpreg.webgpuviewer.renderer.groupLayout
  *
  * Subclasses supply [code] (a `fs_main` taking [Fullscreen.VERTEX]'s `VertexOutput`) and
  * [entries] (its group 0 bindings). Bind groups are kept per source texture rather than for the last one only,
- * since [FilterChain] rotates its textures across frames and a single-entry cache would then
+ * since [FullscreenFilterChain] rotates its textures across frames and a single-entry cache would then
  * miss every frame; a filter whose own bindings change - a new LUT, say - calls [rebind].
  *
  * There is no blend state: the pass covers every pixel and replaces it, and the frame it reads
@@ -89,7 +89,7 @@ abstract class FilterFullscreen : Filter() {
     protected open fun prepare(srcWidth: Int, srcHeight: Int) {}
 
     override fun run(
-        chain: FilterChain,
+        chain: FullscreenFilterChain,
         encoder: GPUCommandEncoder,
         src: GPUTextureView,
         srcWidth: Int,
@@ -115,7 +115,7 @@ abstract class FilterFullscreen : Filter() {
     }
 
     private companion object {
-        /** Enough for [FilterChain]'s texture ring, so a steady chain builds none per frame. */
+        /** Enough for [FullscreenFilterChain]'s texture ring, so a steady chain builds none per frame. */
         const val CACHED_BIND_GROUPS = 4
     }
 }

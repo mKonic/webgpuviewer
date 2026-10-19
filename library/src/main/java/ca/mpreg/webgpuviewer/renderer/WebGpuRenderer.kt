@@ -25,7 +25,7 @@ import androidx.webgpu.TextureUsage
 import androidx.webgpu.UncapturedErrorCallback
 import androidx.webgpu.helper.Util.windowFromSurface
 import androidx.webgpu.helper.initLibrary
-import ca.mpreg.webgpuviewer.filter.FilterChain
+import ca.mpreg.webgpuviewer.filter.FullscreenFilterChain
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer.Companion.mutex
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer.Companion.withContext
 import kotlinx.coroutines.CancellationException
@@ -284,10 +284,10 @@ class WebGpuRenderer {
     private var configuredFormat: Int = 0
 
     /**
-     * Post-processing over the finished frame - see [FilterChain]. Empty by default, in which
+     * Post-processing over the finished frame - see [FullscreenFilterChain]. Empty by default, in which
      * case [render] hands the swapchain texture straight to its caller as it always did.
      */
-    val filters = FilterChain()
+    val filters = FullscreenFilterChain()
 
     var width: Int = 0
     var height: Int = 0

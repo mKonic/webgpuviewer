@@ -10,8 +10,8 @@ import androidx.annotation.RequiresApi
 /**
  * How hard the tile worker may push a device that is heating up.
  *
- * A staged rescaler is sustained GPU work, not a one-off: [UpscalerArtCnn] runs nine compute
- * dispatches per tile, and a reader holds that for as long as the reading lasts. Left alone it
+ * Image filters are sustained GPU work, not a one-off: a network is a compute dispatch per pass
+ * for every block, and a reader holds that for as long as the reading lasts. Left alone it
  * competes with the frame being presented right up until the platform throttles the whole GPU,
  * which costs far more than pacing would have.
  *
@@ -29,7 +29,7 @@ object Thermals {
     private const val TAG = "Thermals"
 
     /**
-     * Milliseconds to wait after a staged tile, by [PowerManager] thermal status. MODERATE is the
+     * Milliseconds to wait after a step that ran filter blocks, by [PowerManager] thermal status. MODERATE is the
      * first level at which the platform is actually throttling something, so it is the first that
      * gets a pause; by SEVERE the GPU is already being cut back and a longer pause costs little
      * that throttling would not have taken anyway.

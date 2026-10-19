@@ -76,6 +76,8 @@ dependencies {
     implementation(libs.androidx.compose.foundation)
 
     embed(libs.androidx.webgpu)
+    testImplementation("junit:junit:4.13.2")
+    testImplementation(libs.androidx.webgpu)
     // androidx.webgpu dependencies
     implementation(libs.androidx.annotation.experimental)
     implementation(libs.kotlinx.coroutines.core)

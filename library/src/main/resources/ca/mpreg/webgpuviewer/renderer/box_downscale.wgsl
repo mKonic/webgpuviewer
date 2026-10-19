@@ -1,19 +1,3 @@
-package ca.mpreg.webgpuviewer.renderer
-
-/**
- * [TileRenderer.downscaler]'s only implementation: every destination pixel is the average of the
- * source pixels its footprint covers, weighted by how much of each it covers, in linear light.
- *
- * Band-limiting the source's own detail is the right answer for shrinking, so unlike the
- * magnifying direction there is nothing here for a network to improve on. It is a [Downscaler]
- * anyway, so both directions are configured the same way.
- */
-class DownscalerBox : Downscaler() {
-    override val code: String get() = CODE
-
-    internal companion object {
-        /** Shared: identical per instance, and what keys [RenderPage]'s pipeline. */
-        internal const val CODE = """
 fn loop_over_tile(
     tex: texture_2d<f32>,
     start_i: vec2<i32>,
@@ -60,7 +44,8 @@ fn loop_over_tile(
     return color_sum / max(weight_sum, 0.0001);
 }
 
-fn resolve_minify(src_start: vec2<f32>, scale: vec2<f32>) -> vec4<f32> {
+// A footprint under a texel gives that texel, blended only where it crosses an edge.
+fn resolve(src_start: vec2<f32>, scale: vec2<f32>) -> vec4<f32> {
     let src_size_f = vec2<f32>(contentSize());
     let src_end = src_start + scale;
 
@@ -124,8 +109,5 @@ fn resolve_minify(src_start: vec2<f32>, scale: vec2<f32>) -> vec4<f32> {
         }
 
         return to_srgb_exact(color_sum / max(weight_sum, 0.0001));
-    }
-}
-"""
     }
 }

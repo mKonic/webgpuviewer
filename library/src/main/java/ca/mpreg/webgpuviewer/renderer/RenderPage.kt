@@ -9,6 +9,7 @@ import androidx.webgpu.GPUBindGroupDescriptor
 import androidx.webgpu.GPUBindGroupEntry
 import androidx.webgpu.GPUBlendComponent
 import androidx.webgpu.GPUBlendState
+import androidx.webgpu.GPUBuffer
 import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUColorTargetState
 import androidx.webgpu.GPUDepthStencilState
@@ -25,7 +26,8 @@ import androidx.webgpu.GPUVertexState
 import androidx.webgpu.OptionalBool
 import androidx.webgpu.PrimitiveTopology.Companion.TriangleList
 import androidx.webgpu.TextureFormat
-import ca.mpreg.webgpuviewer.renderer.RenderPage.MAGNIFY_MAIN
+import ca.mpreg.webgpuviewer.renderer.RenderPage.HEADER
+import ca.mpreg.webgpuviewer.renderer.RenderPage.TILE_HEADER
 import ca.mpreg.webgpuviewer.renderer.RenderPage.TILE_SAMPLER_FS
 import ca.mpreg.webgpuviewer.renderer.RenderPage.draw
 import ca.mpreg.webgpuviewer.renderer.RenderPage.drawMaskedRect
@@ -46,9 +48,10 @@ import java.nio.ByteOrder
  * counterparts, sharing [variantFor]/[drawTile]/[drawMaskedRect] with this object.
  *
  * Three shaders, picked per call:
- *  - [render] - box filter minifying, Catmull-Rom magnifying, in linear light. Sharp and
- *    expensive, so bound to a fixed 2x2-tile window - safe only because its one caller,
- *    [TileRenderer]'s tile generation, always targets a single tile-sized destination.
+ *  - [render] - the resolve a [Sampler] supplies, in linear light: Catmull-Rom magnifying, a box
+ *    filter minifying, unless [TileRenderer]'s samplers say otherwise. Sharp and expensive, so
+ *    bound to a fixed 2x2-tile window - safe only because its one caller, [TileRenderer]'s tile
+ *    generation, always targets a single tile-sized destination.
  *  - [renderFast] - one bilinear tap per pixel, also linear-light via a cheap gamma-2.2
  *    approximation (so a [TileRenderer] tile popping in over it never shows a brightness seam,
  *    close enough that the curve mismatch isn't visible) unless called with `linear = false`,
@@ -118,28 +121,28 @@ object RenderPage {
         )
     }
 
-    /** The two resolves in force. [render] picks between them once the mip level is known. */
+    /**
+     * The resolves in force for enlarging and shrinking draws; [render] picks once the mip level is
+     * known. One [Sampler] can fill both.
+     */
     internal class Filtered(val magnify: Variant, val minify: Variant)
 
     /**
-     * Pipelines for a pair of rescaler resolves, built on first use and kept.
+     * Pipelines for sampler resolves, built on first use and kept.
      *
-     * Keyed by the shader text, not the rescaler, and kept apart by direction: two
-     * [UpscalerCatmullRom]s share a pipeline, and so does an [UpscalerArtCnn] with either, its own
-     * leftover resolve being Catmull-Rom too. Only [TileRenderer] reaches this, and only when its
-     * rescalers change, so hashing a few KB of source is not on any hot path.
+     * Keyed by shader text, so two [Sampler.catmullRom]s, or one in both [Filtered] roles, share one.
+     * Reached only when [TileRenderer]'s samplers change, so hashing a few KB of source is off the hot
+     * path.
      */
-    private val magnifyVariants = HashMap<String, Variant>()
-    private val minifyVariants = HashMap<String, Variant>()
+    private val resolveVariants = HashMap<String, Variant>()
 
-    internal fun filtered(magnify: String, minify: String) = Filtered(
-        magnifyVariants.getOrPut(magnify) {
-            Variant { format -> buildPipeline(HEADER + VS_MAIN + magnify + MAGNIFY_MAIN, format) }
-        },
-        minifyVariants.getOrPut(minify) {
-            Variant { format -> buildPipeline(HEADER + VS_MAIN + minify + MINIFY_MAIN, format) }
-        },
-    )
+    private fun variant(code: String) = resolveVariants.getOrPut(code) {
+        Variant { format -> buildPipeline(HEADER + VS_MAIN + code + RESOLVE_MAIN, format) }
+    }
+
+    /** The resolves the samplers in force supply - see [Sampler.code]. */
+    internal fun filtered(magnify: String, minify: String) =
+        Filtered(variant(magnify), variant(minify))
 
     // As samplerVariant, but stencil-free - Transition's cache-seed pass has none, and doesn't
     // need one: it fills once, then tiles blit on top in later passes via ordinary blending.
@@ -548,24 +551,16 @@ fn fs_main(in: TileVertexOutput) -> @location(0) vec4<f32> {
 """
 
     /**
-     * Fragment stage for a magnifying draw: [Upscaler]'s `resolve_magnify`, and the premultiply
-     * every draw through here ends with.
+     * Fragment stage for a [Sampler]'s `resolve`, plus the premultiply every draw here ends with.
+     * `resolve` gets the pixel's footprint in source texels (start, and size = texels per pixel), not
+     * whether it enlarges or shrinks: the sampler decides.
      */
-    private const val MAGNIFY_MAIN = """
+    private const val RESOLVE_MAIN = """
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let col = resolve_magnify(src_at(in.uv));
-    return vec4<f32>(col.rgb * col.a, col.a);
-}
-"""
-
-    /** As [MAGNIFY_MAIN], for a minifying draw: [Downscaler]'s `resolve_minify`. */
-    private const val MINIFY_MAIN = """
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // resolve_minify takes src_start, the footprint's position in source pixels, and the
-    // footprint's own size - which is how many source pixels one destination pixel covers.
-    let col = resolve_minify(src_at(in.uv), src_per_dst());
+    // The pixel centre maps to the footprint's middle, so the start is half a footprint back.
+    let size = src_per_dst();
+    let col = resolve(src_at(in.uv) - 0.5 * size, size);
     return vec4<f32>(col.rgb * col.a, col.a);
 }
 """
@@ -583,13 +578,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         y: Float,
         scale: Float,
         filtered: Filtered,
+        /** See [Image.prepareForRender]. */
+        extend: Extend? = null,
+        /** See [Image.prepareForRender]. */
+        levelZero: Boolean = false,
+        /** See [draw]. */
+        uniform: GPUBuffer = image.buffer,
+        /** See [Image.prepareForRender]. */
+        source: Mipmap? = null,
     ) {
-        val res = image.prepareForRender(dst, x, y, scale) ?: return
+        val res = image.prepareForRender(dst, x, y, scale, extend, levelZero, source) ?: return
         // Decided here rather than per fragment: it is one value for the whole draw, and a shader
         // carrying both resolves needs registers for the union of them. Against
         // [Image.MipMapForDraw.scale], not the caller's - picking a mip level moves the scale the
         // draw resolves at, and moves it toward 1, the very boundary being tested.
-        draw(pass, image, dst, res, if (res.scale < 1f) filtered.minify else filtered.magnify)
+        draw(pass, dst, res, if (res.scale < 1f) filtered.minify else filtered.magnify, uniform)
     }
 
     /** Picks one of the 4 tile pipelines - shared by [renderFast] and [ImagePage.ImageSingle.renderPage]. */
@@ -639,10 +642,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     private fun draw(
         pass: GPURenderPassEncoder,
-        image: Image,
         dst: GPUTexture,
         res: Image.MipMapForDraw,
-        variant: Variant
+        variant: Variant,
+        /**
+         * Where the placement is written. A draw reads it when the pass runs, not when recorded,
+         * so two draws of one image in one command buffer (two blocks) need a buffer each, or both
+         * see the last write.
+         */
+        uniform: GPUBuffer,
     ) {
         val byteBuffer = quadBytes.get()
         byteBuffer.clear()
@@ -650,11 +658,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         byteBuffer.putFloat(res.mipmap.tilesize.toFloat())
         byteBuffer.flip()
 
-        device.queue.writeBuffer(image.buffer, 0, byteBuffer)
+        device.queue.writeBuffer(uniform, 0, byteBuffer)
 
         val pipeline = variant.pipeline(dst.format)
         val entries = arrayOf(
-            GPUBindGroupEntry(0, buffer = image.buffer),
+            GPUBindGroupEntry(0, buffer = uniform),
         ).plus(res.quad.tileViews.mapIndexed { i, view ->
             GPUBindGroupEntry(1 + i, textureView = view)
         })

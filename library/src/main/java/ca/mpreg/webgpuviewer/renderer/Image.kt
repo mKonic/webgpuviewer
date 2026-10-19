@@ -11,6 +11,7 @@ import androidx.webgpu.GPUTextureView
 import androidx.webgpu.TextureFormat
 import ca.mpreg.webgpuviewer.ImageUtil
 import ca.mpreg.webgpuviewer.Trim
+import ca.mpreg.webgpuviewer.renderer.Image.Companion.TILESIZE
 import ca.mpreg.webgpuviewer.renderer.Image.Companion.invoke
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -23,6 +24,12 @@ import kotlin.math.min
 import kotlin.math.round
 
 const val BUFFER_SIZE = 96L
+
+/** Below this scale (16 texels a pixel) a `levelZero` draw takes a smaller level anyway. */
+private const val LEVEL_ZERO_FLOOR = 1f / 16
+
+/** Edge extension per side, in target pixels. */
+class Extend(val left: Float, val top: Float, val right: Float, val bottom: Float)
 
 /**
  * An unapplied gain map, as [Image] wants it - fill from `ImageDecoder.DecodeResult.gainmap`.
@@ -373,7 +380,10 @@ class Image private constructor(
                     try {
                         return Mipmap.create(pixels, w, h, scale, single, format, validRows, checkOom = true)
                     } catch (e: Mipmap.TextureOutOfMemory) {
-                        Log.w("Renderer", "${e.message} out of memory, splitting ${w}x$h at $TILESIZE")
+                        Log.w(
+                            "Renderer",
+                            "${e.message} out of memory, splitting ${w}x$h at $TILESIZE"
+                        )
                     }
                 }
                 return Mipmap.create(pixels, w, h, scale, TILESIZE, format, validRows)
@@ -623,6 +633,22 @@ class Image private constructor(
         val srcLeft: Float, val srcTop: Float, val srcWidth: Float, val srcHeight: Float,
         val contentWidth: Float, val contentHeight: Float,
     ) {
+        /**
+         * Grown by [by] target pixels per side, the bound texels with it at the same scale; the shader
+         * clamps reads past [contentWidth] x [contentHeight], repeating the edge.
+         */
+        fun extended(by: Extend): Placement {
+            val scale = if (srcWidth > 0f) dstWidth / srcWidth else 1f
+            val scaleY = if (srcHeight > 0f) dstHeight / srcHeight else 1f
+            return Placement(
+                dstLeft - by.left, dstTop - by.top,
+                dstWidth + by.left + by.right, dstHeight + by.top + by.bottom,
+                srcLeft - by.left / scale, srcTop - by.top / scaleY,
+                srcWidth + (by.left + by.right) / scale, srcHeight + (by.top + by.bottom) / scaleY,
+                contentWidth, contentHeight,
+            )
+        }
+
         companion object {
             /** All [width] x [height] texels, [scale] times over at normalised ([x], [y]). */
             fun whole(dst: GPUTexture, x: Float, y: Float, scale: Float, width: Int, height: Int) =
@@ -638,16 +664,34 @@ class Image private constructor(
         val mipmap: Mipmap, val quad: Mipmap.Quad, val placement: Placement, val scale: Float
     )
 
-    fun prepareForRender(dst: GPUTexture, x: Float, y: Float, scale: Float): MipMapForDraw? {
+    /**
+     * The mip level, 2x2 window and placement the filtered shader needs, or null if nothing has
+     * been uploaded yet. [extend] repeats the edge texels that many target pixels out, for a pass
+     * that reads past the picture. [levelZero] reads the base level down to [LEVEL_ZERO_FLOOR]
+     * instead of the pyramid's choice.
+     */
+    fun prepareForRender(
+        dst: GPUTexture,
+        x: Float,
+        y: Float,
+        scale: Float,
+        extend: Extend? = null,
+        levelZero: Boolean = false,
+        /** Draw from this level instead, e.g. a filtered one not among [mipmaps]. */
+        source: Mipmap? = null,
+    ): MipMapForDraw? {
         if (mipmaps.isEmpty()) return null
         if (isHdr) Hdr.noteHdrDrawn(this, hdrHeadroom)
 
-        var level = floor(log2(1 / scale)).toInt().coerceIn(0, mipmaps.size - 1)
+        // Base level for [levelZero] down to LEVEL_ZERO_FLOOR: the box over it is exact, while a
+        // smaller level was resized without linear light.
+        var level = if (levelZero && scale >= LEVEL_ZERO_FLOOR) 0
+        else floor(log2(1 / scale)).toInt().coerceIn(0, mipmaps.size - 1)
 
         // Scale alone isn't enough: getQuad only promises half a tile either side of the view
         // centre, so the viewport must fit in one tile's texels. A <=2x2 grid binds in one go
         // regardless, so only larger ones need checking.
-        while (level < mipmaps.size - 1) {
+        while (source == null && level < mipmaps.size - 1) {
             val m = mipmaps[level]
             if (m.tilesCols <= 2 && m.tilesRows <= 2) break
 
@@ -659,7 +703,7 @@ class Image private constructor(
             level++
         }
 
-        val mipmap = mipmaps[level]
+        val mipmap = source ?: mipmaps[level]
 
         val adjustedX = x + this.x / dst.width + WebGpuRenderer.offsetX
         val adjustedY = y + this.y / dst.height + WebGpuRenderer.offsetY
@@ -672,17 +716,30 @@ class Image private constructor(
         val quad = mipmap.getQuad(vx, vy)
         val levelScale = scale / mipmap.scale
 
+        // Image texels in the window: two tiles, or the rest of the level.
+        val width = min(mipmap.width - quad.x, 2 * mipmap.tilesize)
+        val height = min(mipmap.height - quad.y, 2 * mipmap.tilesize)
+        val whole = Placement.whole(
+            dst,
+            (0.5f / scale + adjustedX) * mipmap.scale + (quad.x - 0.5f * mipmap.width) / dst.width,
+            (0.5f / scale + adjustedY) * mipmap.scale + (quad.y - 0.5f * mipmap.height) / dst.height,
+            levelScale,
+            width,
+            height,
+        )
+
         return MipMapForDraw(
             mipmap,
             quad,
-            Placement.whole(
-                dst,
-                (0.5f / scale + adjustedX) * mipmap.scale + (quad.x - 0.5f * mipmap.width) / dst.width,
-                (0.5f / scale + adjustedY) * mipmap.scale + (quad.y - 0.5f * mipmap.height) / dst.height,
-                levelScale,
-                // Image texels in the window: two tiles, or the rest of the level.
-                min(mipmap.width - quad.x, 2 * mipmap.tilesize),
-                min(mipmap.height - quad.y, 2 * mipmap.tilesize),
+            // Only sides where the window meets the image's edge: elsewhere the picture continues,
+            // in a tile this window doesn't bind.
+            if (extend == null) whole else whole.extended(
+                Extend(
+                    left = if (quad.x == 0) extend.left else 0f,
+                    top = if (quad.y == 0) extend.top else 0f,
+                    right = if (quad.x + width >= mipmap.width) extend.right else 0f,
+                    bottom = if (quad.y + height >= mipmap.height) extend.bottom else 0f,
+                )
             ),
             levelScale,
         )
@@ -736,7 +793,10 @@ class Image private constructor(
 
         val levelScale = scale / mipmap.scale
         val tiles = mipmap.tilesInRect(
-            max(cx - halfW, srcL), max(cy - halfH, srcT), min(cx + halfW, srcR), min(cy + halfH, srcB)
+            max(cx - halfW, srcL),
+            max(cy - halfH, srcT),
+            min(cx + halfW, srcR),
+            min(cy + halfH, srcB)
         )
         return tiles.mapNotNull { tile ->
             // Crop within this tile, in tile texels.

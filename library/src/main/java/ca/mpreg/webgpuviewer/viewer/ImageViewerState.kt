@@ -23,15 +23,12 @@ import androidx.webgpu.LoadOp
 import androidx.webgpu.StoreOp
 import ca.mpreg.webgpuviewer.draw.Draw
 import ca.mpreg.webgpuviewer.draw.clear
-import ca.mpreg.webgpuviewer.filter.FilterChain
-import ca.mpreg.webgpuviewer.renderer.Downscaler
-import ca.mpreg.webgpuviewer.renderer.DownscalerBox
+import ca.mpreg.webgpuviewer.filter.FullscreenFilterChain
 import ca.mpreg.webgpuviewer.renderer.FrameResult
 import ca.mpreg.webgpuviewer.renderer.Hdr
-import ca.mpreg.webgpuviewer.renderer.Rescaler
+import ca.mpreg.webgpuviewer.renderer.ImageFilter
+import ca.mpreg.webgpuviewer.renderer.Sampler
 import ca.mpreg.webgpuviewer.renderer.TileRenderer
-import ca.mpreg.webgpuviewer.renderer.Upscaler
-import ca.mpreg.webgpuviewer.renderer.UpscalerArtCnn
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer
 import ca.mpreg.webgpuviewer.renderer.WebGpuRenderer.Companion.dispatcher
 import ca.mpreg.webgpuviewer.renderer.endAndRelease
@@ -54,27 +51,48 @@ open class ImageViewerState(var isVertical: Boolean = false, var isReversed: Boo
     internal val tiles = TileRenderer { invalidate() }
 
     /**
-     * How a high-quality tile that magnifies the page is resized - see [Rescaler]. Assigning
-     * drops the tiles already generated. [UpscalerArtCnn] doubles through a network first.
+     * Filters over whole images, output kept as a level of each image for the tiles to read - see
+     * [ca.mpreg.webgpuviewer.renderer.ImageFilterChain]. Assigning drops generated tiles. An instance
+     * belongs to one viewer.
      */
-    var upscaler: Upscaler
+    var imageFilters: List<ImageFilter>
+        get() = tiles.imageFilters
+        set(value) {
+            tiles.imageFilters = value
+        }
+
+    /**
+     * [imageFilters] run per high-quality tile instead and kept only as long as it: less memory, more
+     * work - see [ca.mpreg.webgpuviewer.renderer.TilesFilterChain]. Assigning drops generated tiles.
+     */
+    var tileFilters: List<ImageFilter>
+        get() = tiles.tileFilters
+        set(value) {
+            tiles.tileFilters = value
+        }
+
+    /**
+     * Resolves a high-quality tile that magnifies the page in one step - see [Sampler]. Assigning
+     * drops generated tiles.
+     */
+    var upscaler: Sampler
         get() = tiles.upscaler
         set(value) {
             tiles.upscaler = value
         }
 
-    /** How a high-quality tile that shrinks the page is resized. [DownscalerBox] is the only one. */
-    var downscaler: Downscaler
+    /** Resolves a high-quality tile that shrinks the page in one step; usually [Sampler.box]. */
+    var downscaler: Sampler
         get() = tiles.downscaler
         set(value) {
             tiles.downscaler = value
         }
 
     /**
-     * Post-processing over the finished frame - assign [FilterChain.filters] to run some. Wired
-     * to [invalidate] here, so changing a filter's settings redraws by itself.
+     * Post-processing over the finished frame - assign [FullscreenFilterChain.filters] to run some.
+     * Wired to [invalidate] here, so changing a filter's settings redraws by itself.
      */
-    val filters: FilterChain = renderer.filters.also { chain ->
+    val filters: FullscreenFilterChain = renderer.filters.also { chain ->
         chain.onInvalidate = { invalidate() }
     }
 

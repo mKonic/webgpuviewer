@@ -1,31 +1,12 @@
-package ca.mpreg.webgpuviewer.renderer
-
-/**
- * [TileRenderer.upscaler]'s default: Catmull-Rom over the 4x4 neighbourhood in linear light, with
- * no passes of its own.
- *
- * Also what every other [Upscaler] falls back to for the zoom its own passes leave over, which is
- * why [Upscaler.code] defaults to it.
- */
-class UpscalerCatmullRom : Upscaler() {
-    override val code: String get() = CODE
-
-    internal companion object {
-        /**
-         * Shared: identical per instance, and what keys [RenderPage]'s pipeline. The fast path is
-         * a footprint inside one tile of the quad; the slow one clamps and crosses tile edges,
-         * which the separate textures otherwise hide from filtering.
-         */
-        internal const val CODE = """
 fn catmull_rom_weights(t: f32) -> array<f32, 4> {
     let t2 = t * t;
     let t3 = t2 * t;
 
     return array<f32, 4>(
-        -0.5 * t3 + t2 - 0.5 * t,          // Weight 0 (Negative lobe)
-         1.5 * t3 - 2.5 * t2 + 1.0,        // Weight 1 (Primary influence)
-        -1.5 * t3 + 2.0 * t2 + 0.5 * t,    // Weight 2 (Primary influence)
-         0.5 * t3 - 0.5 * t2               // Weight 3 (Negative lobe)
+        -0.5 * t3 + t2 - 0.5 * t,
+         1.5 * t3 - 2.5 * t2 + 1.0,
+        -1.5 * t3 + 2.0 * t2 + 0.5 * t,
+         0.5 * t3 - 0.5 * t2
     );
 }
 
@@ -85,7 +66,7 @@ fn catmull_rom_slow_unrolled(
     return r0 * wy[0] + r1 * wy[1] + r2 * wy[2] + r3 * wy[3];
 }
 
-fn resolve_magnify(src_pos: vec2<f32>) -> vec4<f32> {
+fn catmull_rom_magnify(src_pos: vec2<f32>) -> vec4<f32> {
     let tex_size_u = contentSize();
     let pixel_coord = src_pos - 0.5;
     let base_coord = vec2<i32>(floor(pixel_coord));
@@ -97,8 +78,8 @@ fn resolve_magnify(src_pos: vec2<f32>) -> vec4<f32> {
 
     let ts = i32(transform.tile_size);
 
-    let start_i = base_coord - vec2<i32>(1); // Top-left
-    let end_i   = base_coord + vec2<i32>(2); // Bottom-right
+    let start_i = base_coord - vec2<i32>(1);
+    let end_i   = base_coord + vec2<i32>(2);
 
     let canvas_in_bounds = start_i.x >= 0 && start_i.y >= 0 && end_i.x <= max_coord.x && end_i.y <= max_coord.y;
     let tile_TL = start_i / ts;
@@ -125,10 +106,48 @@ fn resolve_magnify(src_pos: vec2<f32>) -> vec4<f32> {
         final_color_linear = catmull_rom_slow_unrolled(start_i, max_coord, wx, wy);
     }
 
-    // Colour is left unclamped: an HDR tile's is legitimately outside [0,1].
+    // Colour unclamped: an HDR tile's is legitimately outside [0,1].
     let srgb = to_srgb_exact(final_color_linear);
     return vec4<f32>(srgb.rgb, clamp(srgb.a, 0.0, 1.0));
 }
-"""
+
+fn catmull_rom_kernel(x: f32) -> f32 {
+    let a = abs(x);
+    if (a < 1.0) {
+        return 1.5 * a * a * a - 2.5 * a * a + 1.0;
     }
+    if (a < 2.0) {
+        return -0.5 * a * a * a + 2.5 * a * a - 4.0 * a + 2.0;
+    }
+    return 0.0;
+}
+
+// Stretched over a footprint wider than a texel, so shrinking low-passes instead of aliasing.
+fn catmull_rom_scaled(center: vec2<f32>, scale: vec2<f32>) -> vec4<f32> {
+    let s = max(scale, vec2<f32>(1.0));
+    let max_coord = vec2<i32>(contentSize()) - 1;
+    // Texel i, centred at i + 0.5, is in reach within two scaled texels.
+    let first = vec2<i32>(ceil(center - 0.5 - 2.0 * s));
+    let last = vec2<i32>(floor(center - 0.5 + 2.0 * s));
+
+    var sum = vec4<f32>(0.0);
+    var total = 0.0;
+    for (var y: i32 = first.y; y <= last.y; y++) {
+        let wy = catmull_rom_kernel((f32(y) + 0.5 - center.y) / s.y);
+        for (var x: i32 = first.x; x <= last.x; x++) {
+            let w = wy * catmull_rom_kernel((f32(x) + 0.5 - center.x) / s.x);
+            sum += load_safe_linear(vec2<i32>(x, y), max_coord) * w;
+            total += w;
+        }
+    }
+    return sum / max(total, 0.0001);
+}
+
+fn resolve(src_start: vec2<f32>, scale: vec2<f32>) -> vec4<f32> {
+    let center = src_start + 0.5 * scale;
+    if (max(scale.x, scale.y) <= 1.0) {
+        return catmull_rom_magnify(center);
+    }
+    let srgb = to_srgb_exact(catmull_rom_scaled(center, scale));
+    return vec4<f32>(srgb.rgb, clamp(srgb.a, 0.0, 1.0));
 }

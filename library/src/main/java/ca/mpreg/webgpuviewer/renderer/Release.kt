@@ -79,3 +79,22 @@ internal fun GPURenderPipeline.groupLayout(): GPUBindGroupLayout =
 
 internal fun GPUComputePipeline.groupLayout(): GPUBindGroupLayout =
     synchronized(groupLayouts) { groupLayouts.getOrPut(this) { getBindGroupLayout(0) } }
+
+/**
+ * Drops [pipeline]'s cached layout without closing it, for a lost device's objects. Pipelines are
+ * keyed by handle, so a stale entry would hand a new pipeline that reuses the handle a layout it
+ * can't bind with.
+ */
+internal fun forgetGroupLayout(pipeline: Any): GPUBindGroupLayout? =
+    synchronized(groupLayouts) { groupLayouts.remove(pipeline) }
+
+/** Closes the pipeline and its cached layout - see [forgetGroupLayout]. */
+internal fun GPUComputePipeline.closeWithLayout() {
+    forgetGroupLayout(this)?.close()
+    close()
+}
+
+internal fun GPURenderPipeline.closeWithLayout() {
+    forgetGroupLayout(this)?.close()
+    close()
+}

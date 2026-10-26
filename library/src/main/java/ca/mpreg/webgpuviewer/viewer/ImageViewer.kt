@@ -48,8 +48,9 @@ import ca.mpreg.webgpuviewer.waitForRelease
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import androidx.compose.ui.unit.Velocity
 import kotlin.math.abs
-import kotlin.math.pow
+import kotlin.math.exp
 import kotlin.time.Duration.Companion.milliseconds
 
 @Composable
@@ -182,7 +183,7 @@ fun ImageViewer(
                             }
                         }
                         page.animateTo(Offset(0.5f, 0.5f))
-                        if (!stoppedMotion) {
+                        if (!stoppedMotion && !state.contentClaimedTouch) {
                             state.onTap?.invoke(
                                 Offset(
                                     firstDown.position.x / state.width,
@@ -248,7 +249,7 @@ fun ImageViewer(
                                         val py = secondDown.position.y / state.height - 0.5f
 
                                         val newScale =
-                                            originalScale * 10f.pow(2 * totalDeltaY / state.height)
+                                            quickZoomScale(originalScale, totalDeltaY)
 
                                         val diff = 1 / newScale - 1 / originalScale
 
@@ -286,7 +287,7 @@ fun ImageViewer(
                                         val py = secondDown.position.y / state.height - 0.5f
 
                                         val newScale =
-                                            originalScale * 10f.pow(2 * (totalDeltaY + value) / state.height)
+                                            quickZoomScale(originalScale, totalDeltaY + value)
 
                                         val scale =
                                             newScale.fastCoerceIn(page.homeScale, page.maxScale)
@@ -377,13 +378,17 @@ fun ImageViewer(
                                         pointerCountChanged = true
                                     }
                                     if (!pageTurning) {
-                                        velocityTracker.addPointerInputChange(change)
+                                        // The fingers' midpoint: one finger's own speed would fling a
+                                        // still pinch on release.
+                                        velocityTracker.addPosition(change.uptimeMillis, centroid)
                                         single = false
                                         scaleOrigin = Offset(
                                             centroid.x / state.width, centroid.y / state.height
                                         )
                                     }
-                                } else if (single) {
+                                } else if (single && change.pressed) {
+                                    // Not the lift: it repeats the last position, so a lift a moment after the last
+                                    // move reads as the finger having stopped, as Android's tracker knows to skip.
                                     velocityTracker.addPointerInputChange(change)
                                 }
 
@@ -473,7 +478,13 @@ fun ImageViewer(
                     if (longPressed || canceled) return@awaitEachGesture
 
                     if (pageTurning) {
-                        val velocity = velocityTracker.calculateVelocity()
+                        // Without the lift's sample, a finger held still would keep the speed it had moving:
+                        // like Android's tracker, only moves within 100 ms of the lift count
+                        val velocity = if (lastEventTime - lastMoveTime > 100) {
+                            Velocity.Zero
+                        } else {
+                            velocityTracker.calculateVelocity()
+                        }
                         // Always raw, matching panAmount above - see that comment.
                         val initialVelocity =
                             if (state.isVertical) -velocity.y / state.height else -velocity.x / state.width
@@ -588,6 +599,11 @@ fun ImageViewer(
         ComposePageHostView(state, Modifier.matchParentSize())
     }
 }
+
+/**
+ * [scale] after a double tap drag of [dy] px: Telephoto's rate, compounding 0.4% a pixel, so the readers zoom alike.
+ */
+private fun quickZoomScale(scale: Float, dy: Float) = scale * exp(0.004f * dy)
 
 /**
  * Holds the window's HDR colour mode while this viewer is composed, and restores it on window refocus.

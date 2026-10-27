@@ -27,7 +27,7 @@ android {
     compileSdk = 37
 
     defaultConfig {
-        minSdk = 24
+        minSdk = 26
         consumerProguardFiles("proguard-rules.txt")
 
         // For a host's crash log or debug screen - which viewer build a report came from.

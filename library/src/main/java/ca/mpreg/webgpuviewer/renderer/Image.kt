@@ -3,9 +3,6 @@ package ca.mpreg.webgpuviewer.renderer
 import android.graphics.Rect
 import android.graphics.RectF
 import android.util.Log
-import androidx.webgpu.BufferUsage
-import androidx.webgpu.GPUBuffer
-import androidx.webgpu.GPUBufferDescriptor
 import androidx.webgpu.GPUTexture
 import androidx.webgpu.GPUTextureView
 import androidx.webgpu.TextureFormat
@@ -22,8 +19,6 @@ import kotlin.math.log2
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.round
-
-const val BUFFER_SIZE = 96L
 
 /** Below this scale (16 texels a pixel) a `levelZero` draw takes a smaller level anyway. */
 private const val LEVEL_ZERO_FLOOR = 1f / 16
@@ -567,13 +562,6 @@ class Image private constructor(
         }
     }
 
-    private var _buffer: GPUBuffer? = WebGpuRenderer.device.createBuffer(
-        GPUBufferDescriptor(size = BUFFER_SIZE, usage = BufferUsage.CopyDst or BufferUsage.Uniform)
-    )
-
-    val buffer: GPUBuffer
-        get() = _buffer ?: error("Image buffer accessed after cleanup")
-
     val mipmaps: MutableList<Mipmap> = mutableListOf()
 
     /**
@@ -604,8 +592,6 @@ class Image private constructor(
         releaseHdr()
         mipmaps.forEach { it.cleanup() }
         mipmaps.clear()
-        _buffer?.destroyAndRelease()
-        _buffer = null
         fitScratch = null
     }
 
@@ -751,7 +737,6 @@ class Image private constructor(
     class TileForDraw(
         val texture: GPUTexture,
         val view: GPUTextureView,
-        val uniform: GPUBuffer,
         val placement: Placement,
         /** Where its bind groups are kept - see [Mipmap.tileBindGroup]. */
         internal val mipmap: Mipmap,
@@ -817,7 +802,6 @@ class Image private constructor(
             TileForDraw(
                 tile.texture,
                 tile.view,
-                tile.uniform,
                 Placement(
                     tileLeft + levelScale * l, tileTop + levelScale * t,
                     levelScale * (r - l), levelScale * (b - t),

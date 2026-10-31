@@ -35,7 +35,7 @@ exclusiveContent {
 }
 
 // build.gradle.kts
-implementation("ca.mpreg:webgpuviewer:3.0.0")
+implementation("ca.mpreg:webgpuviewer:4.0.0")
 ```
 
 The coordinates are upstream's, so pointing at a different repository is all it takes to build

@@ -47,8 +47,16 @@ jobs:
           echo "Releasing $TAG, build $(bash scripts/version.sh code)"
 
       - name: Clone androidx.webgpu
-        # settings.gradle.kts reads it from raw.githubusercontent.com, which refuses under load.
-        run: git clone --depth 1 https://github.com/mpreg-ca/androidx-webgpu-repo.git "$RUNNER_TEMP/androidx-webgpu-repo"
+        # settings.gradle.kts reads it from raw.githubusercontent.com, which refuses under load. Pinned: the
+        # repo republishes a version in place, and 857991d paired dev06's classes with a Dawn whose JNI
+        # names they don't call.
+        env:
+          ANDROIDX_WEBGPU_COMMIT: 765b859253c21c54594bb9f47a76a2ad6036d954
+        run: |
+          dir="$RUNNER_TEMP/androidx-webgpu-repo"
+          git init -q "$dir"
+          git -C "$dir" fetch -q --depth 1 https://github.com/mpreg-ca/androidx-webgpu-repo.git "$ANDROIDX_WEBGPU_COMMIT"
+          git -C "$dir" checkout -q FETCH_HEAD
 
       - name: Build
         env:

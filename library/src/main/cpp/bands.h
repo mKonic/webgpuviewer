@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -45,7 +46,13 @@ void forEachBand(int rows, int count, const Band &band) {
     if (y0 >= y1) {
       continue;
     }
-    workers.emplace_back([=, &band] { band(y0, y1); });
+    // Out of threads: run the band here rather than let the throw abort the
+    // process through JNI.
+    try {
+      workers.emplace_back([=, &band] { band(y0, y1); });
+    } catch (const std::system_error &) {
+      band(y0, y1);
+    }
   }
 
   band(0, std::min(rowsPerBand, rows));

@@ -104,7 +104,8 @@ void initLUTs() {
  * level at most one short, since the steepest part of the curve moves under one
  * level per bin, and the loop steps the rest. */
 inline uint8_t encodeSrgb(float linearVal) {
-  if (linearVal <= 0.0f)
+  // Negated so NaN lands here too, not on an index past the table.
+  if (!(linearVal > 0.0f))
     return 0;
   if (linearVal >= 1.0f)
     return 255;

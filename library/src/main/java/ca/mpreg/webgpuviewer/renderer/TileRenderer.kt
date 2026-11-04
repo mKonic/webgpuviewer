@@ -470,6 +470,33 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     /** Times every tile this generates - see [TileProfile]. */
     val profile = TileProfile()
 
+    /** Off: no tiles or filters, their memory freed; pages draw fast. Any thread. */
+    @Volatile
+    var enabled = true
+        set(value) {
+            if (field == value) return
+            field = value
+            if (!value) releaseAll()
+            invalidate()
+        }
+
+    private fun releaseAll() {
+        workerScope.launch {
+            if (!WebGpuRenderer.isAvailable) return@launch
+            // Under the mutex, as in [cleanup]: no frame or tile may be recording with them.
+            WebGpuRenderer.withContext {
+                // Turned back on before this ran: frames may already have queued tiles.
+                if (enabled) return@withContext
+                imageChain.cleanup()
+                tilesFilters.cleanup()
+                pages.values.forEach { it.destroyAll(atlasOrNull) }
+                pages.clear()
+                atlasOrNull?.destroy()
+                atlasOrNull = null
+            }
+        }
+    }
+
     // Applied when tiles are blitted, not baked into them, so a change regenerates none.
     val imageLut = Lut3dTexture()
 
@@ -579,19 +606,6 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         imageChain.geometry(st.scale)
     } catch (e: Exception) {
         null
-    }
-
-    /**
-     * Whether either chain's filters run on a tile of [st]'s scale and size, so a plain one is owed
-     * an upgrade once on screen. Shared by [generateTileNow] and [drawCore].
-     */
-    private fun filtersApply(st: PageTiles): Boolean {
-        if (imageChain.runsAt(st.scale)) return true
-        return tilesFilters.runsAt(st.scale) && tilesFilters.fits(
-            st.tileSize,
-            sourceScale(st),
-            st.scale
-        )
     }
 
     private var frame = 0L
@@ -853,21 +867,14 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     /** One cached tile: where in the [TileAtlas] it sits (packed), and when it was last drawn. */
     private class Tile(val atlasOrigin: Int) {
         var lastUsed = 0L
-
-        /**
-         * Cut off screen, so without the filters - see [generateTileNow]. [drawCore] re-cuts it once
-         * visible; a tile cut on screen never is, however that went.
-         */
-        var plain = false
     }
 
     /**
-     * How [generateTile] cuts a tile. [plain]: off screen, without filters, re-cut once on screen.
-     * [opens]: `prepare` opens a pass to carry the opening timestamp - when it makes blocks of the
-     * image filters' level, or the tiles filters run. [detailed]: the profile can split its time,
-     * which it can for the tiles filters alone.
+     * How [generateTile] cuts a tile. [opens]: `prepare` opens a pass to carry the opening
+     * timestamp - when it makes blocks of the image filters' level, or the tiles filters run.
+     * [detailed]: the profile can split its time, which it can for the tiles filters alone.
      */
-    private class TileMode(val plain: Boolean, val opens: Boolean, val detailed: Boolean)
+    private class TileMode(val opens: Boolean, val detailed: Boolean)
 
     /** An image a tile reads through its filtered level; [rect] is the part read, in image pixels. */
     private class FilteredImage(val image: Image, val level: Mipmap, val rect: ImageRect)
@@ -1227,15 +1234,6 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      */
     fun newFrame() {
         frame++
-        atlasOrNull?.let { pool ->
-            retired.forEach { (tileSize, origin) ->
-                pool.release(
-                    tileSize,
-                    origin
-                )
-            }
-        }
-        retired.clear()
         ErrorScopes.pump()
         imageChain.prune()
 
@@ -1275,12 +1273,6 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         }
     }
 
-    /**
-     * Slots of plain tiles their re-cut replaced, as (tile size, origin), freed at the next [newFrame]:
-     * a pass recorded but not yet submitted - [renderFullyTiled]'s - may still read them.
-     */
-    private val retired = ArrayList<Pair<Int, Int>>()
-
     /** Free [st]'s tiles, and its images' filtered levels; the caller removes it from [pages]. */
     private fun dropPage(st: PageTiles) {
         st.destroyAll(atlasOrNull)
@@ -1317,7 +1309,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     )
 
     private fun pagedAnchor(
-        page: ImagePage.ImageSingle, dst: GPUTexture, x: Float, y: Float, scale: Float
+        page: ImagePage.ImageSingle, dstWidth: Int, dstHeight: Int, x: Float, y: Float, scale: Float
     ): PagedAnchor {
         // Pin the grid to the animation's target while actually scale-animating home, so
         // drawCore wipes it once instead of every interpolated frame. Gated on isScaleAnimating,
@@ -1329,9 +1321,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         val effectivePageScale = if (goingHome) page.homeScale else page.scale
         val pageScale = effectivePageScale * scale
         val anchorX =
-            dst.width / 2f + pageScale * ((effectivePageX + x + WebGpuRenderer.offsetX) * dst.width)
+            dstWidth / 2f + pageScale * ((effectivePageX + x + WebGpuRenderer.offsetX) * dstWidth)
         val anchorY =
-            dst.height / 2f + pageScale * ((effectivePageY + y + WebGpuRenderer.offsetY) * dst.height)
+            dstHeight / 2f + pageScale * ((effectivePageY + y + WebGpuRenderer.offsetY) * dstHeight)
         return PagedAnchor(pageScale, anchorX, anchorY, goingHome)
     }
 
@@ -1360,7 +1352,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
     private fun gridPlacement(
         page: ImagePage.ImageSingle,
-        dst: GPUTexture,
+        dstWidth: Int,
+        dstHeight: Int,
         anchorX: Float,
         anchorY: Float,
         centerYOffset: Float,
@@ -1382,9 +1375,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         if (left + right <= 0f || top + bottom <= 0f) return null
 
         val wantL = max(-anchorX - ts, -left)
-        val wantR = min(dst.width - anchorX + ts, right)
+        val wantR = min(dstWidth - anchorX + ts, right)
         val wantT = max(-anchorY - ts, centerYOffset - top)
-        val wantB = min(dst.height - anchorY + ts, centerYOffset + bottom)
+        val wantB = min(dstHeight - anchorY + ts, centerYOffset + bottom)
 
         val snapX = round(anchorX)
         val snapY = round(anchorY)
@@ -1435,14 +1428,16 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     }
 
     /** True if tile ([txi], [tyi]) of [gp]'s grid actually overlaps [dst]'s visible bounds. */
-    private fun tileVisible(gp: GridPlacement, dst: GPUTexture, txi: Int, tyi: Int): Boolean {
+    private fun tileVisible(
+        gp: GridPlacement, dstWidth: Int, dstHeight: Int, txi: Int, tyi: Int
+    ): Boolean {
         val ts = gp.ts
         val px = gp.snapX + txi * ts
         val py = gp.snapY + tyi * ts
         val visL = max(gp.clipL, 0f)
         val visT = max(gp.clipT, 0f)
-        val visR = min(gp.clipR, dst.width.toFloat())
-        val visB = min(gp.clipB, dst.height.toFloat())
+        val visR = min(gp.clipR, dstWidth.toFloat())
+        val visB = min(gp.clipB, dstHeight.toFloat())
         return px < visR && px + ts > visL && py < visB && py + ts > visT
     }
 
@@ -1453,7 +1448,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
     private fun continuousAnchor(
         page: ImagePage.ImageSingle,
-        dst: GPUTexture,
+        dstWidth: Int,
+        dstHeight: Int,
         cameraDocY: Float,
         docTop: Float,
         pageHeight: Float,
@@ -1465,16 +1461,16 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         // [crop], when given, is what fills the viewer's width; the page centres off it.
         val cropWidth = crop?.width() ?: page.width
         if (cropWidth <= 0) return null
-        val pageScaleAtZoom1 = dst.width / cropWidth.toFloat()
+        val pageScaleAtZoom1 = dstWidth / cropWidth.toFloat()
         val pageScale = pageScaleAtZoom1 * scale
         val shiftX = crop?.let { pageScaleAtZoom1 * (page.width / 2f - it.exactCenterX()) }
             ?: 0f
         val shiftY = crop?.let { pageScaleAtZoom1 * (page.height / 2f - it.exactCenterY()) }
             ?: 0f
-        val anchorX = dst.width / 2f +
-                scale * (viewerOffsetX * dst.width + WebGpuRenderer.offsetX * dst.width + shiftX)
+        val anchorX = dstWidth / 2f +
+                scale * (viewerOffsetX * dstWidth + WebGpuRenderer.offsetX * dstWidth + shiftX)
         val anchorY =
-            dst.height / 2f - scale * cameraDocY + scale * WebGpuRenderer.offsetY * dst.height
+            dstHeight / 2f - scale * cameraDocY + scale * WebGpuRenderer.offsetY * dstHeight
         // The caller's measured height, never one derived here - the two must agree exactly.
         val centerYOffset = scale * (docTop + pageHeight / 2f + shiftY)
         return ContinuousAnchor(pageScale, anchorX, anchorY, centerYOffset)
@@ -1487,22 +1483,22 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * with [drawCore] (see [forEachTile]'s doc). Null if the page isn't drawable.
      */
     fun availableTileKeys(page: ImagePage.ImageSingle, dst: GPUTexture): Set<Long>? {
-        if (page.destroyed || !page.highQuality) return null
+        if (page.destroyed || !page.highQuality || !enabled) return null
         if (!page.hasUploadedImage) return null
 
         val st = pages[page] ?: return null
-        val a = pagedAnchor(page, dst, 0f, 0f, 1f)
+        val a = pagedAnchor(page, dst.width, dst.height, 0f, 0f, 1f)
         if (st.contentVersion != page.contentVersion || st.scale != a.pageScale ||
             st.tileSize != preferredTileSize
         ) return emptySet()
-        val gp =
-            gridPlacement(page, dst, a.anchorX, a.anchorY, 0f, a.pageScale, st.tileSize)
-                ?: return null
+        val gp = gridPlacement(
+            page, dst.width, dst.height, a.anchorX, a.anchorY, 0f, a.pageScale, st.tileSize
+        ) ?: return null
         if (gp.wantL >= gp.wantR || gp.wantT >= gp.wantB) return emptySet()
 
         val keys = HashSet<Long>()
         forEachTile(wantedTileRange(gp)) { txi, tyi ->
-            if (tileVisible(gp, dst, txi, tyi)) {
+            if (tileVisible(gp, dst.width, dst.height, txi, tyi)) {
                 val tkey = key(txi, tyi)
                 if (st.tiles.containsKey(tkey)) keys.add(tkey)
             }
@@ -1521,13 +1517,13 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * displaced becomes current and calls [draw] again.
      */
     fun prewarm(page: ImagePage.ImageSingle, dst: GPUTexture) {
-        if (page.destroyed || !page.highQuality) return
+        if (page.destroyed || !page.highQuality || !enabled) return
         if (!page.hasUploadedImage) return
 
         viewportWidth = dst.width
         viewportHeight = dst.height
 
-        val a = pagedAnchor(page, dst, 0f, 0f, 1f)
+        val a = pagedAnchor(page, dst.width, dst.height, 0f, 0f, 1f)
         val st = pages.getOrPut(page) { newGrid(page, a.pageScale) }
         val version = page.contentVersion
 
@@ -1542,8 +1538,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         }
         st.stable = true
 
-        val gp = gridPlacement(page, dst, a.anchorX, a.anchorY, 0f, a.pageScale, st.tileSize)
-            ?: return
+        val gp = gridPlacement(
+            page, dst.width, dst.height, a.anchorX, a.anchorY, 0f, a.pageScale, st.tileSize
+        ) ?: return
         if (gp.wantL >= gp.wantR || gp.wantT >= gp.wantB) return
 
         val wanted = wantedTileRange(gp)
@@ -1601,13 +1598,30 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         x: Float,
         y: Float,
         scale: Float
+    ): Boolean = drawPaged(pass, page, dst.width, dst.height, dst.format, x, y, scale)
+
+    /** The paged [draw] without blitting: queues missing tiles; true once all visible are cut. */
+    fun ensureTiles(page: ImagePage.ImageSingle, width: Int, height: Int): Boolean =
+        drawPaged(null, page, width, height, 0, 0f, 0f, 1f)
+
+    private fun drawPaged(
+        pass: GPURenderPassEncoder?,
+        page: ImagePage.ImageSingle,
+        width: Int,
+        height: Int,
+        format: Int,
+        x: Float,
+        y: Float,
+        scale: Float,
     ): Boolean {
-        val a = pagedAnchor(page, dst, x, y, scale)
+        val a = pagedAnchor(page, width, height, x, y, scale)
         val covered = traced("wgv:tilesDraw") {
             drawCore(
                 pass,
                 page,
-                dst,
+                width,
+                height,
+                format,
                 a.anchorX,
                 a.anchorY,
                 0f,
@@ -1645,15 +1659,50 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         scale: Float,
         suppressGeneration: Boolean,
         crop: Rect? = null,
+    ): Boolean = drawContinuous(
+        pass, page, dst.width, dst.height, dst.format, cameraDocY, docTop, pageHeight, viewerOffsetX,
+        scale, suppressGeneration, crop,
+    )
+
+    /** As the continuous [draw], without blitting - see the paged [ensureTiles]. */
+    fun ensureTiles(
+        page: ImagePage.ImageSingle,
+        width: Int,
+        height: Int,
+        cameraDocY: Float,
+        docTop: Float,
+        pageHeight: Float,
+        viewerOffsetX: Float,
+        scale: Float,
+        crop: Rect? = null,
+    ): Boolean = drawContinuous(
+        null, page, width, height, 0, cameraDocY, docTop, pageHeight, viewerOffsetX, scale, false, crop,
+    )
+
+    private fun drawContinuous(
+        pass: GPURenderPassEncoder?,
+        page: ImagePage.ImageSingle,
+        width: Int,
+        height: Int,
+        format: Int,
+        cameraDocY: Float,
+        docTop: Float,
+        pageHeight: Float,
+        viewerOffsetX: Float,
+        scale: Float,
+        suppressGeneration: Boolean,
+        crop: Rect?,
     ): Boolean {
         val a = continuousAnchor(
-            page, dst, cameraDocY, docTop, pageHeight, viewerOffsetX, scale, crop
+            page, width, height, cameraDocY, docTop, pageHeight, viewerOffsetX, scale, crop
         ) ?: return false
         return traced("wgv:tilesDraw") {
             drawCore(
                 pass,
                 page,
-                dst,
+                width,
+                height,
+                format,
                 a.anchorX,
                 a.anchorY,
                 a.centerYOffset,
@@ -1667,16 +1716,18 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     }
 
     /**
-     * Shared blit-and-enqueue core for both [draw] overloads. [anchorX]/[anchorY] are the
-     * (unrounded) anchor either overload computed; [centerYOffset] is this page's own exact,
-     * unrounded vertical offset from that anchor - zero for the paged overload. See
-     * [PageTiles.centerYOffset] for why comparing it against the stored value also catches a
-     * changed document position.
+     * Shared blit-and-enqueue core for both [draw] overloads, and [ensureTiles] with no [pass].
+     * [anchorX]/[anchorY] are the (unrounded) anchor either overload computed; [centerYOffset] is
+     * this page's own exact, unrounded vertical offset from that anchor - zero for the paged
+     * overload. See [PageTiles.centerYOffset] for why comparing it against the stored value also
+     * catches a changed document position.
      */
     private fun drawCore(
-        pass: GPURenderPassEncoder,
+        pass: GPURenderPassEncoder?,
         page: ImagePage.ImageSingle,
-        dst: GPUTexture,
+        dstWidth: Int,
+        dstHeight: Int,
+        format: Int,
         anchorX: Float,
         anchorY: Float,
         centerYOffset: Float,
@@ -1686,14 +1737,14 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         useStencilMask: Boolean = false,
         crop: Rect? = null,
     ): Boolean {
-        if (page.destroyed || !page.highQuality) return false
+        if (page.destroyed || !page.highQuality || !enabled) return false
         if (!page.hasUploadedImage) return false
 
         // Unlike drawGridForFullPage, nothing else on this path reports the draw to Hdr.
         page.currentImage?.let { if (it.isHdr) Hdr.noteHdrDrawn(it, it.hdrHeadroom) }
 
-        viewportWidth = dst.width
-        viewportHeight = dst.height
+        viewportWidth = dstWidth
+        viewportHeight = dstHeight
 
         val st = pages.getOrPut(page) { newGrid(page, pageScale) }
 
@@ -1741,7 +1792,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         st.centerYOffset = centerYOffset
 
         val gp =
-            gridPlacement(page, dst, anchorX, anchorY, centerYOffset, pageScale, st.tileSize, crop)
+            gridPlacement(
+                page, dstWidth, dstHeight, anchorX, anchorY, centerYOffset, pageScale, st.tileSize, crop
+            )
         if (gp == null) {
             st.pending.clear()
             return false
@@ -1757,11 +1810,13 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         // In tile coordinates, unlike wantT/wantB - not offset by centerYOffset, since a tile's
         // blit position is snapY + ty*ts regardless of which page it belongs to.
         st.txMin = floor(-anchorX / ts).toInt()
-        st.txMax = ceil((dst.width - anchorX) / ts).toInt() - 1
+        st.txMax = ceil((dstWidth - anchorX) / ts).toInt() - 1
         st.tyMin = floor(-anchorY / ts).toInt()
-        st.tyMax = ceil((dst.height - anchorY) / ts).toInt() - 1
+        st.tyMax = ceil((dstHeight - anchorY) / ts).toInt() - 1
 
-        placeGrid(st, dst, gp.snapX, gp.snapY, gp.clipL, gp.clipT, gp.clipR, gp.clipB)
+        placeGrid(
+            st, dstWidth, dstHeight, gp.snapX, gp.snapY, gp.clipL, gp.clipT, gp.clipR, gp.clipB
+        )
 
         val wanted = wantedTileRange(gp)
 
@@ -1773,22 +1828,13 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             val tile = st.tiles[tkey]
             if (tile != null) {
                 tile.lastUsed = frame
-                // Cut plain off screen; now visible, so queued for the worker to re-cut - see
-                // [Tile.plain]. Drawn until the replacement lands: dropping it now would leave a hole
-                // this draw reports as covered.
-                if (tile.plain && st.stable && tileVisible(gp, dst, txi, tyi) && filtersApply(st)) {
-                    st.pending.add(tkey)
-                    // Gone from this frame's draw too, so the live page has to fill it until the
-                    // replacement lands.
-                    covered = false
-                }
             } else {
                 if (st.stable) st.pending.add(tkey)
-                if (covered && tileVisible(gp, dst, txi, tyi)) covered = false
+                if (covered && tileVisible(gp, dstWidth, dstHeight, txi, tyi)) covered = false
             }
         }
 
-        drawInstanced(pass, dst.format, st, useStencilMask)
+        if (pass != null) drawInstanced(pass, format, st, useStencilMask)
 
         // Drop what fell outside the wanted range, else a page scrolling past keeps accumulating
         // tiles. Only when the range moved - a scroll crosses a tile boundary every tile-size
@@ -2076,8 +2122,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                             traced("wgv:tile") { generate(req, this) }?.let { step ->
                                 step.job?.let { measurements.add(it) }
                                 filtered = step.blocks > 0
-                                // Plain tiles only: a no-op would drag the average to nothing,
-                                // and block encoding isn't per tile.
+                                // Tiles without blocks only: a no-op would drag the average to
+                                // nothing, and block encoding isn't per tile.
                                 if (step.tile && step.blocks == 0) {
                                     recordTileOverhead((System.nanoTime() - started).toDouble())
                                 }
@@ -2132,6 +2178,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
      * [OFF_SCREEN_SCORE].
      */
     private fun nextRequest(): Request? {
+        // Turned off: [releaseAll] is about to free all of it.
+        if (!enabled) return null
         var bestPriority = Float.MAX_VALUE
         var bestState: PageTiles? = null
         var bestKey = 0L
@@ -2206,6 +2254,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         tx: Int,
         ty: Int,
         measurementScope: CoroutineScope = workerScope,
+        /** Labels the profile only: every tile is cut alike. */
         onScreen: Boolean = true,
         blockLimit: Int = Int.MAX_VALUE,
     ): Generated? {
@@ -2214,16 +2263,10 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         val ts = st.tileSize
         val blockSize = imageChain.blockSize
 
-        // Filters only on screen: a network is a compute dispatch per pass, and the margin ring and
-        // [prewarm]'s grids are unseen, so that cost would only compete with the presented frame.
-        // They render plain; [drawCore] upgrades them once on screen.
-
+        if (st.tiles.containsKey(key(tx, ty))) return null
         // Each image's filtered level, its blocks under the tile made here if missing - see
         // [imageLevels] - or else the image itself.
-        // Cut already, unless plain and this one is on screen - see [generateTile].
-        val existing = st.tiles[key(tx, ty)]
-        if (existing != null && !(existing.plain && onScreen)) return null
-        val found = if (onScreen) imageLevels(st, tx, ty) else null
+        val found = imageLevels(st, tx, ty)
         if (found === ImageLevels.Later) return null
         val blank = found === ImageLevels.Blank
         val levels = found as? ImageLevels.Ready
@@ -2275,7 +2318,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         val halo = tiles.halo(st.scale)
         val size = inner + 2 * halo
         val runTiles =
-            !blank && onScreen && tiles.runsAt(st.scale) && tiles.fits(ts, sourceScale, st.scale)
+            !blank && tiles.runsAt(st.scale) && tiles.fits(ts, sourceScale, st.scale)
         // Null: a filter gave up - fall through rather than lose the tile.
         val input = if (runTiles) tiles.input(size, atlas.format, st.scale) else null
         val inputView = tiles.view
@@ -2283,7 +2326,6 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
 
         val made = if (levels != null) missingBlocks(levels) else 0
         val mode = TileMode(
-            plain = !onScreen,
             opens = made > 0 || throughTiles,
             // The profile's time split covers the tiles filters alone.
             detailed = throughTiles && made == 0,
@@ -2566,8 +2608,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         val s = scale
         val centerY = st.centerYOffset * (scale / st.scale)
         val dst = ts + 2f * inset
-        // With filters on, every tile reads the base level, filtered or not, so a plain fallback
-        // matches its replacement.
+        // With filters on, every tile reads the base level, filtered or not, so one the filters
+        // couldn't run on matches its neighbours.
         val levelZero = imageChain.isActive || tilesFilters.isActive
 
         // A halo past the page's edge would read nothing, which a network takes for black, darkening
@@ -2627,16 +2669,18 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     private fun drawGridForFullPage(
         pass: GPURenderPassEncoder, page: ImagePage.ImageSingle, dst: GPUTexture
     ): PageTiles? {
-        if (page.destroyed || !page.highQuality) return null
+        if (page.destroyed || !page.highQuality || !enabled) return null
         // This path draws cached tiles without touching the image, so it has to report for itself.
         page.currentImage?.let { if (it.isHdr) Hdr.noteHdrDrawn(it, it.hdrHeadroom) }
         if (!page.hasUploadedImage) return null
 
-        val a = pagedAnchor(page, dst, 0f, 0f, 1f)
+        val a = pagedAnchor(page, dst.width, dst.height, 0f, 0f, 1f)
         drawCore(
             pass,
             page,
-            dst,
+            dst.width,
+            dst.height,
+            dst.format,
             a.anchorX,
             a.anchorY,
             0f,
@@ -2659,7 +2703,9 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             drawCore(
                 pass,
                 page,
-                dst,
+                dst.width,
+                dst.height,
+                dst.format,
                 a.anchorX,
                 a.anchorY,
                 0f,
@@ -2684,7 +2730,6 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         val st = drawGridForFullPage(pass, page, dst) ?: return false
         if (st.pending.isEmpty()) return true
 
-        // Missing tiles only: a plain one awaiting its re-cut is already drawn, and the worker replaces it.
         val toGenerate = st.pending.filter { !st.tiles.containsKey(it) }
         st.pending.removeAll(toGenerate.toSet())
         traced("wgv:tilesNow") {
@@ -2725,9 +2770,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         render: (GPURenderPassEncoder, GPUTexture) -> Unit
     ): Job? {
         val key = key(tx, ty)
-        // Cut already, unless plain and this cut isn't.
-        val existing = st.tiles[key]
-        if (existing != null && !(existing.plain && !mode.plain)) return null
+        if (st.tiles.containsKey(key)) return null
         evict()
 
         val pool = atlas
@@ -2787,7 +2830,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             }
             pool.copyScratchInto(encoder, origin, st.tileSize)
             device.queue.submitAndRelease(encoder)
-            storeTile(st, key, origin, mode)
+            storeTile(st, key, origin)
             if (run != null) {
                 run.cpuMs = (System.nanoTime() - run.cpuStart) / 1e6
                 profile.report(run, null)
@@ -2848,7 +2891,7 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             releaseTimestampBuffers(timing)
             throw e
         }
-        storeTile(st, key, origin, mode)
+        storeTile(st, key, origin)
 
         val made = blocks()
         return measurementScope.launch {
@@ -2863,10 +2906,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
         }
     }
 
-    /** Keep a just-cut tile, retiring the plain one it replaces - see [retired]. */
-    private fun storeTile(st: PageTiles, key: Long, origin: Int, mode: TileMode) {
-        st.tiles[key]?.let { retired.add(st.tileSize to it.atlasOrigin) }
-        st.tiles[key] = Tile(origin).also { it.lastUsed = frame; it.plain = mode.plain }
+    private fun storeTile(st: PageTiles, key: Long, origin: Int) {
+        st.tiles[key] = Tile(origin).also { it.lastUsed = frame }
         st.instancesDirty = true
     }
 
@@ -2950,7 +2991,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     /** Where [st]'s next blits land in [dst]: its snapped anchor and clip rect, in pixels. */
     private fun placeGrid(
         st: PageTiles,
-        dst: GPUTexture,
+        dstWidth: Int,
+        dstHeight: Int,
         snapX: Float,
         snapY: Float,
         clipL: Float,
@@ -2960,8 +3002,8 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
     ) {
         st.snapX = snapX
         st.snapY = snapY
-        st.dstW = dst.width.toFloat()
-        st.dstH = dst.height.toFloat()
+        st.dstW = dstWidth.toFloat()
+        st.dstH = dstHeight.toFloat()
         st.clipL = clipL
         st.clipT = clipT
         st.clipR = clipR
@@ -3013,7 +3055,6 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
             if (!WebGpuRenderer.isAvailable) {
                 pages.clear()
                 atlasOrNull = null
-                retired.clear()
                 timestampPool.clear()
                 stencilTextures.fill(null)
                 stencilViews.fill(null)
@@ -3036,7 +3077,6 @@ internal class TileRenderer(private val invalidate: () -> Unit) {
                 pages.clear()
                 atlasOrNull?.destroy()
                 atlasOrNull = null
-                retired.clear()
                 timestampPool.forEach { it.resolve.destroyAndRelease(); it.result.destroyAndRelease() }
                 timestampPool.clear()
                 for (i in 0 until STENCIL_BUFFER_COUNT) {

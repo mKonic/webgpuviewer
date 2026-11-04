@@ -509,13 +509,27 @@ class Mipmap(
      */
     private val tileBindGroups = HashMap<GPURenderPipeline, Array<GPUBindGroup?>>(2)
 
+    /** Tile [index] moved [dx] columns and [dy] rows, or [index] itself past the last of either. */
+    private fun neighbour(index: Int, dx: Int, dy: Int): Int {
+        val column = index % tilesCols + dx
+        val row = index / tilesCols + dy
+        return if (column < tilesCols && row < tilesRows) row * tilesCols + column else index
+    }
+
     /** The group [pipeline] draws tile [index] with. On the render thread. */
     internal fun tileBindGroup(index: Int, pipeline: GPURenderPipeline): GPUBindGroup {
         val groups = tileBindGroups.getOrPut(pipeline) { arrayOfNulls(textures.size) }
         return groups[index] ?: device.createBindGroup(
             GPUBindGroupDescriptor(
                 layout = pipeline.groupLayout(),
-                entries = arrayOf(GPUBindGroupEntry(1, textureView = textureViews[index])),
+                entries = arrayOf(
+                    GPUBindGroupEntry(1, textureView = textureViews[index]),
+                    // The tiles right, down and diagonal, which a read near a shared edge also
+                    // samples; itself where there is none.
+                    GPUBindGroupEntry(4, textureView = textureViews[neighbour(index, 1, 0)]),
+                    GPUBindGroupEntry(5, textureView = textureViews[neighbour(index, 0, 1)]),
+                    GPUBindGroupEntry(6, textureView = textureViews[neighbour(index, 1, 1)]),
+                ),
             )
         ).also { groups[index] = it }
     }
@@ -533,9 +547,10 @@ class Mipmap(
         if (l >= r || t >= b) return emptyList()
 
         val c0 = (l / tilesize).toInt().coerceIn(0, tilesCols - 1)
-        val c1 = ((r - 1f) / tilesize).toInt().coerceIn(0, tilesCols - 1)
+        // Last texel touched: a right edge past a tile's start reaches into it.
+        val c1 = ((ceil(r) - 1f) / tilesize).toInt().coerceIn(0, tilesCols - 1)
         val row0 = (t / tilesize).toInt().coerceIn(0, tilesRows - 1)
-        val row1 = ((b - 1f) / tilesize).toInt().coerceIn(0, tilesRows - 1)
+        val row1 = ((ceil(b) - 1f) / tilesize).toInt().coerceIn(0, tilesRows - 1)
 
         val result = ArrayList<TileRect>((c1 - c0 + 1) * (row1 - row0 + 1))
         for (row in row0..row1) {

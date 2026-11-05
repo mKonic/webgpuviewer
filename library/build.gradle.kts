@@ -1,9 +1,4 @@
-import com.android.build.api.artifact.SingleArtifact
 import org.gradle.api.artifacts.result.ResolvedDependencyResult
-import java.io.File
-import java.util.zip.ZipEntry
-import java.util.zip.ZipFile
-import java.util.zip.ZipOutputStream
 
 plugins {
     alias(libs.plugins.android.library)
@@ -65,9 +60,6 @@ android {
     }
 }
 
-val embed: Configuration = configurations.create("embed") { isTransitive = false }
-configurations.named("compileOnly") { extendsFrom(embed) }
-
 dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.annotation)
@@ -78,36 +70,15 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel)
     implementation(libs.androidx.savedstate)
 
-    embed(libs.androidx.webgpu)
+    api(libs.androidx.webgpu)
     testImplementation("junit:junit:4.13.2")
     testImplementation(libs.androidx.webgpu)
-    // androidx.webgpu dependencies
-    implementation(libs.androidx.annotation.experimental)
-    implementation(libs.kotlinx.coroutines.core)
-}
-
-androidComponents {
-    onVariants(selector().withBuildType("release")) { variant ->
-        val mergeTask =
-            project.tasks.register<MergeEmbeddedAarsTask>(
-                "merge${variant.name.replaceFirstChar { it.uppercase() }}EmbeddedAars"
-            ) {
-                embedAars.from(embed)
-            }
-        variant.artifacts
-            .use(mergeTask)
-            .wiredWithFiles(
-                MergeEmbeddedAarsTask::inputAar,
-                MergeEmbeddedAarsTask::outputAar
-            )
-            .toTransform(SingleArtifact.AAR)
-    }
 }
 
 /**
  * The ivy descriptor a host resolves the release AAR through - a GitHub release is not a Maven
  * repository, so the dependencies travel beside the AAR. Lists this build's direct runtime
- * dependencies at the versions it resolved; androidx.webgpu is merged into the AAR, so it is not one.
+ * dependencies at the versions it resolved, androidx.webgpu among them.
  */
 val writeIvyDescriptor by tasks.registering {
     val runtime = configurations.named("releaseRuntimeClasspath")
@@ -182,107 +153,5 @@ afterEvaluate {
 
         publishToMavenCentral(automaticRelease = true)
         signAllPublications()
-    }
-}
-
-/**
- * Merges the classes.jar, native libs (jni/), and assets from [embedAars] into [inputAar],
- * producing [outputAar]. Used to embed androidx.webgpu directly into this library's own AAR
- * so downstream consumers don't need to resolve it (or its custom repo) separately.
- */
-abstract class MergeEmbeddedAarsTask : DefaultTask() {
-    @get:InputFile
-    abstract val inputAar: RegularFileProperty
-
-    @get:InputFiles
-    abstract val embedAars: ConfigurableFileCollection
-
-    @get:OutputFile
-    abstract val outputAar: RegularFileProperty
-
-    @TaskAction
-    fun merge() {
-        val outFile = outputAar.get().asFile
-        outFile.parentFile.mkdirs()
-        if (outFile.exists()) outFile.delete()
-
-        val ownAarFile = inputAar.get().asFile
-        val embedAarFiles = embedAars.files
-
-        val mergedClassesJarBytes = mergeClassesJars(ownAarFile, embedAarFiles)
-
-        ZipFile(ownAarFile).use { ownZip ->
-            ZipOutputStream(outFile.outputStream()).use { zos ->
-                val writtenPaths = mutableSetOf<String>()
-
-                fun writeEntry(name: String, bytes: ByteArray) {
-                    if (!writtenPaths.add(name)) return
-                    zos.putNextEntry(ZipEntry(name))
-                    zos.write(bytes)
-                    zos.closeEntry()
-                }
-
-                for (entry in ownZip.entries()) {
-                    if (entry.isDirectory) continue
-                    if (entry.name == "classes.jar") {
-                        writeEntry("classes.jar", mergedClassesJarBytes)
-                    } else {
-                        writeEntry(entry.name, ownZip.getInputStream(entry).readBytes())
-                    }
-                }
-
-                for (embedAarFile in embedAarFiles) {
-                    ZipFile(embedAarFile).use { embedZip ->
-                        for (entry in embedZip.entries()) {
-                            if (entry.isDirectory) continue
-                            if (entry.name == "classes.jar") continue
-                            if (entry.name == "AndroidManifest.xml") continue
-                            writeEntry(entry.name, embedZip.getInputStream(entry).readBytes())
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private fun mergeClassesJars(ownAarFile: File, embedAarFiles: Set<File>): ByteArray {
-        val tmpJar = File.createTempFile("merged-classes", ".jar")
-        try {
-            ZipOutputStream(tmpJar.outputStream()).use { zos ->
-                val seen = mutableSetOf<String>()
-
-                fun addClassesJarFrom(aarFile: File) {
-                    ZipFile(aarFile).use { aarZip ->
-                        val classesEntry = aarZip.getEntry("classes.jar") ?: return
-                        val tmpIn = File.createTempFile("classes-in", ".jar")
-                        try {
-                            aarZip.getInputStream(classesEntry).use { input ->
-                                tmpIn.outputStream().use { input.copyTo(it) }
-                            }
-                            ZipFile(tmpIn).use { classesZip ->
-                                for (entry in classesZip.entries()) {
-                                    if (entry.isDirectory) continue
-                                    if (!seen.add(entry.name)) continue
-                                    zos.putNextEntry(ZipEntry(entry.name))
-                                    classesZip.getInputStream(entry).use { it.copyTo(zos) }
-                                    zos.closeEntry()
-                                }
-                            }
-                        } finally {
-                            tmpIn.delete()
-                        }
-                    }
-                }
-
-                // Our own classes come first so they win any (unexpected) name conflicts.
-                addClassesJarFrom(ownAarFile)
-                for (embedAarFile in embedAarFiles) {
-                    addClassesJarFrom(embedAarFile)
-                }
-            }
-            return tmpJar.readBytes()
-        } finally {
-            tmpJar.delete()
-        }
     }
 }
